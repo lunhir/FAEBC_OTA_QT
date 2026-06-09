@@ -2,6 +2,10 @@ QT += core gui widgets sql network serialport
 
 CONFIG += c++17
 
+# 把 .pro 所在目录注入为编译期宏，数据库固定存放在项目源码目录，
+# 与工作目录/Debug/Release 无关（修复 Debug 下打开旧只读库的问题）
+DEFINES += APP_SOURCE_DIR=\\\"$$PWD\\\"
+
 QMAKE_CXX  = D:/Qt/Tools/mingw1310_64/bin/g++.exe
 QMAKE_CC   = D:/Qt/Tools/mingw1310_64/bin/gcc.exe
 QMAKE_LINK = D:/Qt/Tools/mingw1310_64/bin/g++.exe

@@ -5,7 +5,15 @@
       "Read(//c//**)",
       "Bash(ls \"D:/\" 2>&1 | grep -i qt || echo \"No Qt dirs found at D:/\")",
       "Read(//d//**)",
-      "Bash(\"D:/Qt/6.11.1/mingw_64/bin/qmake.exe\" OTA_Test.pro)"
+      "Bash(\"D:/Qt/6.11.1/mingw_64/bin/qmake.exe\" OTA_Test.pro)",
+      "Bash(ls D:/Qt/Tools/mingw1310_64/bin/qmake.exe)",
+      "Bash(ls D:/Qt/6.11.1/mingw_64/bin/qmake.exe)",
+      "Bash(ls C:/newQt/6.9.1/mingw_64/bin/qmake.exe)",
+      "Bash(PATH=/d/Qt/Tools/mingw1310_64/bin:__TRACKED_VAR__ /d/Qt/Tools/mingw1310_64/bin/mingw32-make.exe -f Makefile.Debug -j4)",
+      "Bash(cp -f \"D:/WeiXin/Documents/xwechat_files/wxid_uwl42grw1nbm12_b7d7/msg/file/2026-05/ota_devices.db\" \"d:/Admin/OTA_Test/OTA_Test/ota_devices.db\")",
+      "Bash(chmod u+w \"d:/Admin/OTA_Test/OTA_Test/ota_devices.db\")",
+      "Bash(which sqlite3 *)",
+      "Bash(sqlite3 ota_devices.db \"SELECT 'devices='||COUNT\\(*\\) FROM devices; SELECT 'groups='||COUNT\\(*\\) FROM groups;\")"
     ],
     "additionalDirectories": [
       "d:\\Admin\\OTA_Test\\wifi_station"

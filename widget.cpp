@@ -20,6 +20,9 @@
 #include <QInputDialog>
 #include <QFileInfo>
 #include <QFile>
+#include <QDir>
+#include <QDirIterator>
+#include <QDateTime>
 #include <QFont>
 #include <QMenu>
 #include <QAction>
@@ -1522,8 +1525,28 @@ void Widget::onTreeContextMenu(const QPoint &pos)
 // ─────────────────────────────────────────────────────────────────────────────
 void Widget::setupDatabase()
 {
+    // 数据库固定存放在项目源码目录（APP_SOURCE_DIR 由 .pro 注入），
+    // 避免 Debug/Release 各自的工作目录指向不同的 ota_devices.db
+#ifndef APP_SOURCE_DIR
+#define APP_SOURCE_DIR "."
+#endif
+    const QString dbPath = QDir(QString(APP_SOURCE_DIR)).absoluteFilePath("ota_devices.db");
+
+    // 首次切换到新位置时，从 build 目录里最新的旧库迁移一次历史数据
+    if (!QFile::exists(dbPath)) {
+        seedDatabaseFrom(dbPath);
+    }
+
+    // 历史遗留的库文件可能被标记为只读（如 build 目录里的拷贝），
+    // 只读会让后续 INSERT/UPDATE 静默失败——打开前先清掉只读属性
+    if (QFile::exists(dbPath)) {
+        QFile::setPermissions(dbPath,
+            QFileDevice::ReadOwner  | QFileDevice::WriteOwner |
+            QFileDevice::ReadUser   | QFileDevice::WriteUser);
+    }
+
     m_db = QSqlDatabase::addDatabase("QSQLITE");
-    m_db.setDatabaseName("ota_devices.db");
+    m_db.setDatabaseName(dbPath);
     if (!m_db.open()) {
         addLog("数据库打开失败: " + m_db.lastError().text());
         return;
@@ -1582,7 +1605,41 @@ void Widget::setupDatabase()
         "  password TEXT NOT NULL DEFAULT ''"
         ")");
 
-    addLog("数据库已就绪: ota_devices.db");
+    addLog("数据库已就绪: " + dbPath);
+}
+
+// 切换到固定数据库位置后，首次启动时把 build 目录中最新一份历史库迁移过来，
+// 避免“看起来数据全没了”。只在目标库尚不存在时执行一次。
+void Widget::seedDatabaseFrom(const QString &dbPath)
+{
+    QDir root(QString(APP_SOURCE_DIR));
+    QString newestPath;
+    QDateTime newestTime;
+
+    // 在源码目录树下递归找所有遗留的 ota_devices.db，挑修改时间最新的
+    QDirIterator it(root.absolutePath(), QStringList() << "ota_devices.db",
+                    QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext()) {
+        QFileInfo fi(it.next());
+        if (fi.absoluteFilePath() == dbPath) {
+            continue;  // 跳过目标自身
+        }
+        if (newestPath.isEmpty() || fi.lastModified() > newestTime) {
+            newestPath = fi.absoluteFilePath();
+            newestTime = fi.lastModified();
+        }
+    }
+
+    if (newestPath.isEmpty()) {
+        return;  // 没有可迁移的历史库，全新开始
+    }
+
+    if (QFile::copy(newestPath, dbPath)) {
+        addLog("已迁移历史数据库: " + newestPath + " → " + dbPath);
+    }
+    else {
+        addLog("历史数据库迁移失败，将新建空库: " + newestPath);
+    }
 }
 
 void Widget::saveDevice(const QString &uid, const QString &groupName)

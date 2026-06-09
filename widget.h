@@ -122,6 +122,7 @@ private:
 
     // ── Database ────────────────────────────────────────────────────────────
     void setupDatabase();
+    void seedDatabaseFrom(const QString &dbPath);
     void saveDevice(const QString &uid, const QString &groupName = "未知");
     void loadHistoryDevices();
     void saveBrokerProfile(const BrokerProfile &p);
