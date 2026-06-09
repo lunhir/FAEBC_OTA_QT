@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"C:/\" 2>&1 | grep -i qt || echo \"No Qt dirs found at C:/\")",
+      "Read(//c//**)",
+      "Bash(ls \"D:/\" 2>&1 | grep -i qt || echo \"No Qt dirs found at D:/\")",
+      "Read(//d//**)",
+      "Bash(\"D:/Qt/6.11.1/mingw_64/bin/qmake.exe\" OTA_Test.pro)"
+    ],
+    "additionalDirectories": [
+      "d:\\Admin\\OTA_Test\\wifi_station"
+    ]
+  }
+}
