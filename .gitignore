@@ -1,0 +1,23 @@
+# Qt Creator 用户配置（因人而异，不入库）
+.qtcreator/
+*.pro.user
+*.pro.user.*
+
+# qmake 生成
+Makefile
+Makefile.Debug
+Makefile.Release
+.qmake.stash
+ui_*.h
+moc_*.cpp
+qrc_*.cpp
+*.o
+*.obj
+
+# 构建目录
+build*/
+debug/
+release/
+
+# 运行时产物
+*.db

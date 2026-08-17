@@ -14,12 +14,14 @@ SOURCES += \
     main.cpp \
     widget.cpp \
     protocol.cpp \
-    mqttclient.cpp
+    mqttclient.cpp \
+    mqttotatask.cpp
 
 HEADERS += \
     widget.h \
     protocol.h \
-    mqttclient.h
+    mqttclient.h \
+    mqttotatask.h
 
 FORMS += \
     widget.ui

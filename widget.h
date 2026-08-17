@@ -17,14 +17,19 @@
 #include <QTreeWidgetItem>
 #include <QTableWidget>
 #include <QStackedWidget>
+#include <QList>
+#include <QQueue>
 #include <QSerialPort>
 #include <QSerialPortInfo>
 #include "mqttclient.h"
+#include "mqttotatask.h"
 #include "protocol.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class Widget; }
 QT_END_NAMESPACE
+
+class QGroupBox;
 
 // ─── Broker connection profile ─────────────────────────────────────────────
 struct BrokerProfile {
@@ -94,8 +99,7 @@ private slots:
     void onLoadDibFromFileClicked();
     void onResetDeviceClicked();
     void onViewDibLogClicked();
-    void onRemoteUnlockClicked();
-    void onRemoteLockClicked();
+    void onProtectedPagesLockClicked();
     void onChargeAllowClicked();
     void onChargeLimitClicked();
     void onEraseFlashClicked();
@@ -103,6 +107,9 @@ private slots:
 private:
     // ── UI ─────────────────────────────────────────────────────────────────
     void buildUI();
+    QWidget *createProtectedPage(QWidget *content, const QString &pageName);
+    void tryUnlockProtectedPages(QLineEdit *passwordEdit, QLabel *hintLabel);
+    void setProtectedPagesUnlocked(bool unlocked);
     void updateDeviceInfo();
     void addLog(const QString &msg);
 
@@ -135,6 +142,10 @@ private:
     void handleOtaUplink(const QString &deviceId, Protocol::MsgType type,
                          const QByteArray &data);
     void handleDebugResponse(const QString &deviceId, const QByteArray &data);
+    void handleChargeMonitorMessage(const QString &deviceId,
+                                    Protocol::MsgType type,
+                                    const QByteArray &data);
+    void sendChargeMonitorCommand(Protocol::ChargeMonitorCommand command);
 
     // 下发 DIB 配置到指定设备（MCU 写入 Sector 10）
     void sendDibConfig(const QString &deviceId,
@@ -145,12 +156,31 @@ private:
                        uint16_t port,
                        uint16_t wifiAddr);
 
-    // ── OTA state machine ───────────────────────────────────────────────────
-    void startOta();
+    // ── Serial OTA state machine ────────────────────────────────────────────
     void sendOtaData();
     void otaNextStep(Protocol::MsgType type, const QByteArray &data);
     void otaFail(const QString &reason);
     void otaSuccess();
+
+    // ── Concurrent MQTT OTA task manager ────────────────────────────────────
+    QStringList selectedDeviceUids() const;
+    void createMqttOtaTasks();
+    void startQueuedMqttOtaTasks();
+    void updateMqttOtaQueuePositions();
+    void updateMqttOtaSummary();
+    void updateOtaControls();
+    int runningMqttOtaTaskCount() const;
+    MqttOtaTask *mqttOtaTask(quint64 taskId) const;
+    int mqttOtaTaskRow(quint64 taskId) const;
+    void addMqttOtaTaskRow(MqttOtaTask *task);
+    void updateMqttOtaTaskRow(quint64 taskId);
+    void clearFinishedMqttOtaTasks();
+    void onMqttOtaPacketReady(quint64 taskId,
+                              const QString &deviceId,
+                              Protocol::MsgType type,
+                              const QByteArray &data,
+                              int timeoutMs);
+    void onMqttOtaTaskFinished(quint64 taskId, bool success);
 
     // ── Helpers ─────────────────────────────────────────────────────────────
     void refreshSerialPorts();       // 刷新端口列表（智能，不重置已选端口）
@@ -199,6 +229,11 @@ private:
     QProgressBar *m_otaProgress  = nullptr;
     QLabel       *m_lblOtaStatus = nullptr;
     QPushButton  *m_btnStart     = nullptr;
+    QGroupBox    *m_serialOtaGroup = nullptr;
+    QGroupBox    *m_mqttOtaGroup = nullptr;
+    QTableWidget *m_mqttOtaTable = nullptr;
+    QLabel       *m_lblMqttOtaSummary = nullptr;
+    QPushButton  *m_btnClearFinishedOta = nullptr;
 
     // Debug-tab
     QPushButton  *m_btnReadDebug  = nullptr;
@@ -217,13 +252,17 @@ private:
     QTableWidget *m_debugTable    = nullptr;
     QLabel       *m_lblDebugFrom  = nullptr;
 
-    // ── 远程控制 ───────────────────────────────────────────────────────
-    QStackedWidget *m_remoteStack    = nullptr;
-    QLineEdit      *m_remotePassEdit = nullptr;
-    QPushButton    *m_btnRemoteUnlock= nullptr;
-    QPushButton    *m_btnRemoteLock  = nullptr;
-    QLabel         *m_lblRemoteHint  = nullptr;
-    bool            m_remoteUnlocked = false;
+    // System event monitor tab (protocol names remain ChargeMonitor for compatibility)
+    QLabel      *m_lblChargeMonitorState = nullptr;
+    QTextEdit   *m_chargeMonitorLog = nullptr;
+    QPushButton *m_btnChargeMonitorArm = nullptr;
+    QPushButton *m_btnChargeMonitorStop = nullptr;
+
+    // ── 全局维护权限：任一受保护页面解锁后，五个页面同步解锁 ─────────────
+    QList<QStackedWidget *> m_protectedPageStacks;
+    QList<QLineEdit *>      m_protectedPasswordEdits;
+    QList<QLabel *>         m_protectedHintLabels;
+    bool                    m_protectedPagesUnlocked = false;
     QPushButton    *m_btnChargeAllow = nullptr;
     QPushButton    *m_btnChargeLimit = nullptr;
     QPushButton    *m_btnEraseFlash  = nullptr;
@@ -239,12 +278,19 @@ private:
     // Selection & OTA
     QString    m_selectedUid;
     OtaState   m_otaState   = OtaState::Idle;
-    OtaChannel m_otaChannel = OtaChannel::Mqtt;   // 当前 OTA 使用的通道
     QByteArray m_firmware;
+    QString    m_firmwareName;
     QString    m_otaUid;       // device_id of device currently being upgraded
     int        m_otaPkt      = 0;
     int        m_otaPktTotal = 0;
     int        m_otaRetry    = 0;   // 当前包已重传次数（最多 3 次）
+
+    static constexpr int kMaxConcurrentMqttOtaTasks = 5;
+    quint64 m_nextMqttOtaTaskId = 1;
+    QMap<quint64, MqttOtaTask *> m_mqttOtaTasks;
+    QMap<QString, quint64> m_mqttOtaByUid;
+    QMap<QString, quint64> m_lastSuccessfulMqttOtaByUid;
+    QQueue<quint64> m_mqttOtaQueue;
 
     // Custom title bar
     QWidget *m_titleBar = nullptr;

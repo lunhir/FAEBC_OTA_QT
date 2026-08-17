@@ -41,6 +41,97 @@
 #include <QKeySequence>
 #include <QGuiApplication>
 #include <QClipboard>
+#include <QLocale>
+
+namespace {
+
+QString chargeMonitorReasonText(const QString &reason)
+{
+    if (reason == "armed")                 return "检测已启动";
+    if (reason == "disabled")              return "检测已停止";
+    if (reason == "charge_started")         return "车辆开始充电";
+    if (reason == "charge_completed")       return "充电正常完成";
+    if (reason == "charge_stopped")         return "充电提前停止";
+    if (reason == "bms_charge_fault")       return "BMS报告充电故障";
+    if (reason == "can_bus_off")            return "CAN1进入Bus-Off";
+    if (reason == "can_recover_failed")     return "CAN1恢复失败";
+    if (reason == "can_auto_recovered")     return "CAN1控制器自动恢复监听";
+    if (reason == "can_recovered")          return "CAN1控制器强制恢复监听";
+    if (reason == "can_tx_error")           return "CAN1发送失败";
+    if (reason == "can_no_ack")             return "CAN1无应答";
+    if (reason == "can_tx_queue_drop")      return "CAN1发送队列丢帧";
+    if (reason == "can_error")              return "CAN1发生通信错误";
+    if (reason == "can_tx_silent")          return "CAN1连续3秒没有发送";
+    if (reason == "can_tx_resumed")         return "CAN1发送已经恢复";
+    if (reason == "system_sleep_warning")   return "设备将在约1分钟后休眠";
+    if (reason == "system_sleep")           return "设备正在进入休眠";
+    return "未知事件（" + reason + "）";
+}
+
+QString chargeMonitorReasonAdvice(const QString &reason)
+{
+    if (reason == "can_tx_queue_drop")
+        return "本次检测已新增至少3次发送队列丢帧，请检查任务调度、队列容量和发送任务运行情况。";
+    if (reason == "can_bus_off")
+        return "CAN控制器已Bus-Off，请检查终端电阻、波特率、线束和外部节点供电。";
+    if (reason == "can_recover_failed")
+        return "自动恢复未成功，需要继续检查CAN外设状态和物理总线。";
+    if (reason == "can_recovered" || reason == "can_auto_recovered")
+        return "CAN1控制器已恢复监听，但不代表外部节点已经应答；请同时检查无应答计数。";
+    if (reason == "can_no_ack")
+        return "连续发送未收到外部节点ACK，请检查外部节点供电、波特率、正常/只听模式、终端电阻和CAN线束。";
+    if (reason == "can_tx_silent")
+        return "系统检测期间没有新的CAN帧提交，优先检查周期定时器和BMS_CAN_task。";
+    if (reason == "can_tx_resumed")
+        return "CAN1成功提交计数重新增长，发送静默已经解除，系统继续监测。";
+    if (reason == "system_sleep_warning")
+        return "休眠条件已持续约1分钟；若唤醒输入和WiFi状态仍未恢复，设备约1分钟后进入休眠。";
+    if (reason == "bms_charge_fault")
+        return "BMS充电状态为故障，请结合BMS报文和故障码判断。";
+    return {};
+}
+
+QString bmsChargeStateText(int state)
+{
+    switch (state) {
+        case 0: return "空闲（0）";
+        case 1: return "充电中（1）";
+        case 2: return "充电完成（2）";
+        case 3: return "充电故障（3）";
+        default: return QString("未知（%1）").arg(state);
+    }
+}
+
+QString chargeMonitorStateText(int state)
+{
+    switch (static_cast<Protocol::ChargeMonitorState>(state)) {
+        case Protocol::ChargeMonitorState::Disabled: return "未布防";
+        case Protocol::ChargeMonitorState::Armed:    return "系统事件监测中（当前未充电）";
+        case Protocol::ChargeMonitorState::Charging: return "系统事件监测中（正在充电）";
+    }
+    return QString("未知（%1）").arg(state);
+}
+
+QString canHalStateText(int state)
+{
+    switch (state) {
+        case 0: return "复位";
+        case 1: return "就绪";
+        case 2: return "正常监听";
+        case 3: return "等待休眠";
+        case 4: return "已休眠";
+        case 5: return "错误";
+        default: return QString("未知（%1）").arg(state);
+    }
+}
+
+QString formattedCount(const QJsonObject &object, const char *key)
+{
+    static const QLocale numberLocale(QLocale::English);
+    return numberLocale.toString(object.value(key).toVariant().toLongLong());
+}
+
+} // namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Global stylesheet
@@ -409,6 +500,128 @@ Widget::~Widget()
     delete ui;
 }
 
+QWidget *Widget::createProtectedPage(QWidget *content,
+                                     const QString &pageName)
+{
+    auto *root = new QWidget;
+    root->setStyleSheet("background:transparent;");
+    auto *rootLayout = new QVBoxLayout(root);
+    rootLayout->setContentsMargins(12, 12, 12, 12);
+
+    auto *stack = new QStackedWidget(root);
+
+    // Page 0：密码门。每个受保护页面都有入口，但共享同一个解锁状态。
+    auto *gate = new QWidget;
+    auto *gateLayout = new QVBoxLayout(gate);
+    gateLayout->setContentsMargins(0, 30, 0, 0);
+    gateLayout->setSpacing(12);
+    gateLayout->setAlignment(Qt::AlignTop);
+
+    auto *title = new QLabel(pageName + " · 受密码保护");
+    title->setStyleSheet("color:#FF2E97;font-weight:bold;letter-spacing:2px;"
+                         "font-size:14px;background:transparent;");
+    title->setAlignment(Qt::AlignCenter);
+    gateLayout->addWidget(title);
+
+    auto *form = new QHBoxLayout;
+    form->setAlignment(Qt::AlignCenter);
+    auto *passwordLabel = new QLabel("密码：");
+    passwordLabel->setStyleSheet(
+        "color:#FF2E97;font-weight:bold;background:transparent;");
+    auto *passwordEdit = new QLineEdit;
+    passwordEdit->setEchoMode(QLineEdit::Password);
+    passwordEdit->setMaxLength(32);
+    passwordEdit->setFixedWidth(220);
+    passwordEdit->setPlaceholderText("请输入维护访问密码");
+    passwordEdit->setStyleSheet(
+        "QLineEdit{background:#0A0F1F;color:#00E5FF;"
+        "border:1px solid #00B8D4;border-radius:2px;padding:4px 6px;}"
+        "QLineEdit:focus{border:1px solid #FF2E97;}");
+    auto *unlockButton = new QPushButton("解锁");
+    unlockButton->setFixedWidth(80);
+    form->addWidget(passwordLabel);
+    form->addWidget(passwordEdit);
+    form->addWidget(unlockButton);
+    gateLayout->addLayout(form);
+
+    auto *hint = new QLabel(" ");
+    hint->setAlignment(Qt::AlignCenter);
+    hint->setStyleSheet("color:#FFB000;background:transparent;");
+    gateLayout->addWidget(hint);
+    gateLayout->addStretch();
+
+    // Page 1：统一的已解锁标题栏 + 原页面内容。
+    auto *unlockedPage = new QWidget;
+    auto *unlockedLayout = new QVBoxLayout(unlockedPage);
+    unlockedLayout->setContentsMargins(0, 0, 0, 0);
+    unlockedLayout->setSpacing(8);
+    auto *bar = new QHBoxLayout;
+    auto *unlockedLabel = new QLabel("● 维护权限已解锁");
+    unlockedLabel->setStyleSheet(
+        "color:#00FF88;font-weight:bold;background:transparent;");
+    auto *lockButton = new QPushButton("重新锁定");
+    lockButton->setFixedWidth(100);
+    bar->addWidget(unlockedLabel);
+    bar->addStretch();
+    bar->addWidget(lockButton);
+    unlockedLayout->addLayout(bar);
+    auto *separator = new QFrame;
+    separator->setFrameShape(QFrame::HLine);
+    separator->setStyleSheet("background:#00B8D4;border:none;max-height:1px;");
+    unlockedLayout->addWidget(separator);
+    unlockedLayout->addWidget(content, 1);
+
+    stack->addWidget(gate);
+    stack->addWidget(unlockedPage);
+    stack->setCurrentIndex(m_protectedPagesUnlocked ? 1 : 0);
+    rootLayout->addWidget(stack);
+
+    m_protectedPageStacks.append(stack);
+    m_protectedPasswordEdits.append(passwordEdit);
+    m_protectedHintLabels.append(hint);
+
+    connect(unlockButton, &QPushButton::clicked, this,
+            [this, passwordEdit, hint]() {
+                tryUnlockProtectedPages(passwordEdit, hint);
+            });
+    connect(passwordEdit, &QLineEdit::returnPressed, this,
+            [this, passwordEdit, hint]() {
+                tryUnlockProtectedPages(passwordEdit, hint);
+            });
+    connect(lockButton, &QPushButton::clicked,
+            this, &Widget::onProtectedPagesLockClicked);
+
+    return root;
+}
+
+void Widget::tryUnlockProtectedPages(QLineEdit *passwordEdit, QLabel *hintLabel)
+{
+    static const QString kMaintenancePassword = "12342234";
+
+    if (passwordEdit != nullptr && passwordEdit->text() == kMaintenancePassword) {
+        setProtectedPagesUnlocked(true);
+        addLog("[维护权限] 已解锁 OTA、调试数据、系统事件、远程控制和设备参数");
+        return;
+    }
+
+    if (hintLabel != nullptr)
+        hintLabel->setText("密码错误");
+    if (passwordEdit != nullptr)
+        passwordEdit->selectAll();
+    addLog("[维护权限] 密码错误，拒绝解锁");
+}
+
+void Widget::setProtectedPagesUnlocked(bool unlocked)
+{
+    m_protectedPagesUnlocked = unlocked;
+    for (auto *edit : m_protectedPasswordEdits)
+        edit->clear();
+    for (auto *hint : m_protectedHintLabels)
+        hint->setText(" ");
+    for (auto *stack : m_protectedPageStacks)
+        stack->setCurrentIndex(unlocked ? 1 : 0);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  UI Construction
 // ─────────────────────────────────────────────────────────────────────────────
@@ -578,6 +791,8 @@ void Widget::buildUI()
     m_tree->setColumnCount(2);
     m_tree->setIndentation(16);
     m_tree->setAnimated(true);
+    // OTA 页面支持一次选中多台设备；其他页面仍以 currentItem 作为当前设备。
+    m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_tree->setContextMenuPolicy(Qt::CustomContextMenu);
     m_tree->header()->setStretchLastSection(false);
     m_tree->header()->setSectionResizeMode(0, QHeaderView::Stretch);
@@ -746,8 +961,8 @@ void Widget::buildUI()
 
     otaVL->addWidget(fwGrp);
 
-    // ── 开始按钮（统一入口）──────────────────────────────────────────
-    m_btnStart = new QPushButton("▶   EXECUTE  OTA  UPLINK");
+    // ── 开始/新建任务按钮（按当前通道切换语义）──────────────────────
+    m_btnStart = new QPushButton("＋   新建升级任务");
     m_btnStart->setEnabled(false);
     m_btnStart->setMinimumHeight(42);
     m_btnStart->setStyleSheet(
@@ -763,9 +978,45 @@ void Widget::buildUI()
             "border:1px solid #112028;}");
     otaVL->addWidget(m_btnStart);
 
-    // ── 升级进度 ──────────────────────────────────────────────────────
-    auto *progGrp = new QGroupBox("升级进度");
-    auto *progVL  = new QVBoxLayout(progGrp);
+    // ── MQTT 并发升级任务 ─────────────────────────────────────────────
+    m_mqttOtaGroup = new QGroupBox("MQTT 升级任务（最多同时 5 台，其余自动排队）");
+    auto *mqttTaskVL = new QVBoxLayout(m_mqttOtaGroup);
+    mqttTaskVL->setSpacing(8);
+
+    auto *mqttSummaryRow = new QHBoxLayout;
+    m_lblMqttOtaSummary = new QLabel("运行 0 / 5　排队 0　成功 0　失败 0");
+    m_lblMqttOtaSummary->setStyleSheet(
+        "color:#7FDEEA;font-family:Consolas,monospace;"
+        "background:transparent;border:none;");
+    m_btnClearFinishedOta = new QPushButton("清除已完成");
+    m_btnClearFinishedOta->setFixedWidth(100);
+    mqttSummaryRow->addWidget(m_lblMqttOtaSummary);
+    mqttSummaryRow->addStretch();
+    mqttSummaryRow->addWidget(m_btnClearFinishedOta);
+    mqttTaskVL->addLayout(mqttSummaryRow);
+
+    m_mqttOtaTable = new QTableWidget(0, 4);
+    m_mqttOtaTable->setHorizontalHeaderLabels(
+        {"设备 UID", "固件", "状态", "进度"});
+    m_mqttOtaTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_mqttOtaTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_mqttOtaTable->setFocusPolicy(Qt::NoFocus);
+    m_mqttOtaTable->verticalHeader()->setVisible(false);
+    m_mqttOtaTable->horizontalHeader()->setSectionResizeMode(
+        0, QHeaderView::ResizeToContents);
+    m_mqttOtaTable->horizontalHeader()->setSectionResizeMode(
+        1, QHeaderView::Stretch);
+    m_mqttOtaTable->horizontalHeader()->setSectionResizeMode(
+        2, QHeaderView::Stretch);
+    m_mqttOtaTable->horizontalHeader()->setSectionResizeMode(
+        3, QHeaderView::ResizeToContents);
+    m_mqttOtaTable->setMinimumHeight(170);
+    mqttTaskVL->addWidget(m_mqttOtaTable, 1);
+    otaVL->addWidget(m_mqttOtaGroup, 1);
+
+    // ── 串口升级仍保留单任务进度 ─────────────────────────────────────
+    m_serialOtaGroup = new QGroupBox("串口升级进度");
+    auto *progVL  = new QVBoxLayout(m_serialOtaGroup);
     progVL->setSpacing(8);
 
     m_otaProgress = new QProgressBar;
@@ -779,7 +1030,8 @@ void Widget::buildUI()
                                   "letter-spacing:1px;"
                                   "background:transparent;border:none;");
     progVL->addWidget(m_lblOtaStatus);
-    otaVL->addWidget(progGrp);
+    m_serialOtaGroup->setVisible(false);
+    otaVL->addWidget(m_serialOtaGroup);
     otaVL->addStretch();
 
     // ── 通道切换联动 ──────────────────────────────────────────────────
@@ -788,19 +1040,18 @@ void Widget::buildUI()
         OtaChannel ch = (OtaChannel)m_cmbChannel->itemData(idx).toInt();
         bool isSerial = (ch == OtaChannel::Serial);
         m_serialRow->setVisible(isSerial);
-        // 串口通道：只要串口已打开 + 有固件即可开始，不需要在线设备
-        if (isSerial) {
-            m_btnStart->setEnabled(!m_firmware.isEmpty() && m_serial->isOpen()
-                                   && m_otaState == OtaState::Idle);
-        } else {
-            m_btnStart->setEnabled(
-                !m_selectedUid.isEmpty() && !m_firmware.isEmpty() &&
-                m_devices.contains(m_selectedUid) && m_devices[m_selectedUid].isActive());
-        }
+        m_serialOtaGroup->setVisible(isSerial);
+        m_mqttOtaGroup->setVisible(!isSerial);
+        m_btnStart->setText(isSerial
+                                ? "▶   开始串口升级"
+                                : "＋   新建升级任务");
+        updateOtaControls();
     });
 
     connect(m_btnSerialOpen,   &QPushButton::clicked, this, &Widget::onSerialOpenClicked);
     connect(m_btnRefreshPorts, &QPushButton::clicked, this, &Widget::onRefreshSerialPorts);
+    connect(m_btnClearFinishedOta, &QPushButton::clicked,
+            this, &Widget::clearFinishedMqttOtaTasks);
 
     // 后台自动检测串口插拔（每 2 秒扫描一次）
     m_portScanTimer = new QTimer(this);
@@ -812,7 +1063,8 @@ void Widget::buildUI()
     for (int i = 0; i < m_cmbSerialPort->count(); ++i)
         m_lastPortList << m_cmbSerialPort->itemText(i);
 
-    tabs->addTab(otaW, "  OTA 升级  ");
+    tabs->addTab(createProtectedPage(otaW, "OTA 升级"),
+                 "  OTA 升级  ");
 
     // ── Tab 3: 调试数据 ───────────────────────────────────────────────────
     auto *dbgW  = new QWidget;
@@ -877,7 +1129,53 @@ void Widget::buildUI()
         m_lblDebugFrom->setText("来源: —");
     });
 
-    tabs->addTab(dbgW, "  调试数据  ");
+    tabs->addTab(createProtectedPage(dbgW, "调试数据"),
+                 "  调试数据  ");
+
+    // System event monitor: normally silent; the device reports important state changes.
+    auto *chargeMonW = new QWidget;
+    chargeMonW->setStyleSheet("background:transparent;");
+    auto *chargeMonVL = new QVBoxLayout(chargeMonW);
+    chargeMonVL->setContentsMargins(12, 12, 12, 12);
+    chargeMonVL->setSpacing(8);
+
+    auto *chargeMonTop = new QHBoxLayout;
+    m_btnChargeMonitorArm = new QPushButton("开始系统检测");
+    m_btnChargeMonitorStop = new QPushButton("停止检测");
+    m_lblChargeMonitorState = new QLabel("状态: 未布防");
+    m_lblChargeMonitorState->setStyleSheet(
+        "color:#FF2E97;font-family:Consolas,monospace;background:transparent;");
+    chargeMonTop->addWidget(m_btnChargeMonitorArm);
+    chargeMonTop->addWidget(m_btnChargeMonitorStop);
+    chargeMonTop->addWidget(m_lblChargeMonitorState);
+    chargeMonTop->addStretch();
+    chargeMonVL->addLayout(chargeMonTop);
+
+    m_chargeMonitorLog = new QTextEdit;
+    m_chargeMonitorLog->setReadOnly(true);
+    m_chargeMonitorLog->setFont(QFont("Consolas", 9));
+    m_chargeMonitorLog->setStyleSheet(
+        "QTextEdit{background:#020510;color:#A8FFF2;"
+        "border-radius:2px;border:1px solid #00B8D4;"
+        "selection-background-color:#FF2E97;selection-color:#05060E;}");
+    chargeMonVL->addWidget(m_chargeMonitorLog, 1);
+
+    auto *chargeMonBottom = new QHBoxLayout;
+    auto *btnClearChargeMon = new QPushButton("清除日志");
+    chargeMonBottom->addStretch();
+    chargeMonBottom->addWidget(btnClearChargeMon);
+    chargeMonVL->addLayout(chargeMonBottom);
+
+    connect(m_btnChargeMonitorArm, &QPushButton::clicked, this, [this]() {
+        sendChargeMonitorCommand(Protocol::ChargeMonitorCommand::Arm);
+    });
+    connect(m_btnChargeMonitorStop, &QPushButton::clicked, this, [this]() {
+        sendChargeMonitorCommand(Protocol::ChargeMonitorCommand::Disable);
+    });
+    connect(btnClearChargeMon, &QPushButton::clicked,
+            m_chargeMonitorLog, &QTextEdit::clear);
+    tabs->addTab(createProtectedPage(chargeMonW, "系统事件"),
+                 "  系统事件  ");
 
     // ── Tab 4: 设备参数 (DIB) ──────────────────────────────────────────
     auto *dibW  = new QWidget;
@@ -962,77 +1260,10 @@ void Widget::buildUI()
     // 设备参数 tab 延后到远程控制之后再 addTab（位置互换）
 
     // ── Tab 5: 远程控制 ───────────────────────────────────────────────────
-    auto *remoteW  = new QWidget;
-    remoteW->setStyleSheet("background:transparent;");
-    auto *remoteVL = new QVBoxLayout(remoteW);
-    remoteVL->setContentsMargins(12, 12, 12, 12);
-    remoteVL->setSpacing(10);
-
-    m_remoteStack = new QStackedWidget;
-
-    // ─ Page 0: 密码门 ────────────────────────────────────────────────
-    auto *gateW  = new QWidget;
-    auto *gateVL = new QVBoxLayout(gateW);
-    gateVL->setContentsMargins(0, 30, 0, 0);
-    gateVL->setSpacing(12);
-    gateVL->setAlignment(Qt::AlignTop);
-
-    auto *gateTitle = new QLabel("远程控制 · 受密码保护");
-    gateTitle->setStyleSheet("color:#FF2E97;font-weight:bold;letter-spacing:2px;"
-                             "font-size:14px;background:transparent;");
-    gateTitle->setAlignment(Qt::AlignCenter);
-    gateVL->addWidget(gateTitle);
-
-    auto *gateDesc = new QLabel("此页面提供对设备的高权限操作，请输入访问密码。");
-    gateDesc->setStyleSheet("color:#00E5FF;background:transparent;");
-    gateDesc->setAlignment(Qt::AlignCenter);
-    gateVL->addWidget(gateDesc);
-
-    auto *gateForm = new QHBoxLayout;
-    gateForm->setAlignment(Qt::AlignCenter);
-    auto *passLbl = new QLabel("密码：");
-    passLbl->setStyleSheet("color:#FF2E97;font-weight:bold;background:transparent;");
-    m_remotePassEdit = new QLineEdit;
-    m_remotePassEdit->setEchoMode(QLineEdit::Password);
-    m_remotePassEdit->setMaxLength(32);
-    m_remotePassEdit->setFixedWidth(220);
-    m_remotePassEdit->setPlaceholderText("请输入访问密码");
-    m_remotePassEdit->setStyleSheet(
-        "QLineEdit{background:#0A0F1F;color:#00E5FF;"
-        "border:1px solid #00B8D4;border-radius:2px;padding:4px 6px;}"
-        "QLineEdit:focus{border:1px solid #FF2E97;}");
-    m_btnRemoteUnlock = new QPushButton("解锁");
-    m_btnRemoteUnlock->setFixedWidth(80);
-    gateForm->addWidget(passLbl);
-    gateForm->addWidget(m_remotePassEdit);
-    gateForm->addWidget(m_btnRemoteUnlock);
-    gateVL->addLayout(gateForm);
-
-    m_lblRemoteHint = new QLabel(" ");
-    m_lblRemoteHint->setAlignment(Qt::AlignCenter);
-    m_lblRemoteHint->setStyleSheet("color:#FFB000;background:transparent;");
-    gateVL->addWidget(m_lblRemoteHint);
-    gateVL->addStretch();
-
-    // ─ Page 1: 控制面板 ────────────────────────────────────────────────
     auto *ctrlW  = new QWidget;
     auto *ctrlVL = new QVBoxLayout(ctrlW);
     ctrlVL->setContentsMargins(0, 0, 0, 0);
     ctrlVL->setSpacing(10);
-
-    auto *ctrlBar = new QHBoxLayout;
-    auto *unlockedLbl = new QLabel("● 已解锁");
-    unlockedLbl->setStyleSheet("color:#00FF88;font-weight:bold;background:transparent;");
-    m_btnRemoteLock = new QPushButton("重新锁定");
-    m_btnRemoteLock->setFixedWidth(100);
-    ctrlBar->addWidget(unlockedLbl);
-    ctrlBar->addStretch();
-    ctrlBar->addWidget(m_btnRemoteLock);
-    ctrlVL->addLayout(ctrlBar);
-
-    auto *ctrlSep = new QFrame; ctrlSep->setFrameShape(QFrame::HLine);
-    ctrlSep->setStyleSheet("background:#00B8D4;border:none;max-height:1px;");
-    ctrlVL->addWidget(ctrlSep);
 
     auto *ctrlGrp = new QGroupBox("设备操控");
     auto *ctrlGrpVL = new QVBoxLayout(ctrlGrp);
@@ -1090,19 +1321,6 @@ void Widget::buildUI()
 
     ctrlVL->addWidget(ctrlGrp);
     ctrlVL->addStretch();
-
-    m_remoteStack->addWidget(gateW);   // index 0: 密码门
-    m_remoteStack->addWidget(ctrlW);   // index 1: 控制面板
-    m_remoteStack->setCurrentIndex(0);
-
-    remoteVL->addWidget(m_remoteStack);
-
-    connect(m_btnRemoteUnlock, &QPushButton::clicked,
-            this, &Widget::onRemoteUnlockClicked);
-    connect(m_remotePassEdit, &QLineEdit::returnPressed,
-            this, &Widget::onRemoteUnlockClicked);
-    connect(m_btnRemoteLock, &QPushButton::clicked,
-            this, &Widget::onRemoteLockClicked);
     connect(m_btnReset, &QPushButton::clicked,
             this, &Widget::onResetDeviceClicked);
     // connect(m_btnChargeAllow, &QPushButton::clicked,
@@ -1112,8 +1330,10 @@ void Widget::buildUI()
     connect(m_btnEraseFlash, &QPushButton::clicked,
             this, &Widget::onEraseFlashClicked);
 
-    tabs->addTab(remoteW, "  远程控制  ");
-    tabs->addTab(dibW,    "  设备参数  ");
+    tabs->addTab(createProtectedPage(ctrlW, "远程控制"),
+                 "  远程控制  ");
+    tabs->addTab(createProtectedPage(dibW, "设备参数"),
+                 "  设备参数  ");
 
     // ── Tab 5: Log ────────────────────────────────────────────────────────
     auto *logW  = new QWidget;
@@ -1295,25 +1515,34 @@ void Widget::updateTreeItem(const QString &uid)
 void Widget::onTreeSelectionChanged()
 {
     const auto sel = m_tree->selectedItems();
-    if (sel.isEmpty()) return;
-    QTreeWidgetItem *item = sel.first();
-    if (item->data(0, Qt::UserRole + 1).toString() != "device") return;
+    if (sel.isEmpty()) {
+        updateOtaControls();
+        return;
+    }
+
+    QTreeWidgetItem *item = m_tree->currentItem();
+    if (item == nullptr ||
+        item->data(0, Qt::UserRole + 1).toString() != "device") {
+        item = nullptr;
+        for (QTreeWidgetItem *candidate : sel) {
+            if (candidate->data(0, Qt::UserRole + 1).toString() == "device") {
+                item = candidate;
+                break;
+            }
+        }
+    }
+    if (item == nullptr) {
+        updateOtaControls();
+        return;
+    }
 
     QString uid = item->data(0, Qt::UserRole).toString();
     m_selectedUid = uid;
     updateDeviceInfo();
-    {
-        OtaChannel ch = (OtaChannel)m_cmbChannel->currentData().toInt();
-        if (ch == OtaChannel::Serial)
-            m_btnStart->setEnabled(!m_firmware.isEmpty() && m_serial->isOpen()
-                                   && m_otaState == OtaState::Idle);
-        else
-            m_btnStart->setEnabled(!m_firmware.isEmpty() &&
-                                   m_otaState == OtaState::Idle &&
-                                   m_devices.contains(uid) &&
-                                   m_devices[uid].isActive());
-    }
-    addLog("已选择设备: " + uid);
+    updateOtaControls();
+    addLog(QString("当前设备: %1（OTA 已选择 %2 台）")
+               .arg(uid)
+               .arg(selectedDeviceUids().size()));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1855,6 +2084,8 @@ void Widget::onMqttConnected()
     m_mqtt->subscribe(Protocol::TOPIC_STATUS_SUB, 1);
     addLog(QString("已订阅: %1  %2")
            .arg(Protocol::TOPIC_UP_SUB).arg(Protocol::TOPIC_STATUS_SUB));
+    startQueuedMqttOtaTasks();
+    updateOtaControls();
 }
 
 void Widget::onMqttDisconnected()
@@ -1864,6 +2095,14 @@ void Widget::onMqttDisconnected()
                                "background:transparent;border:none;");
     m_btnConnect->setText("▶ CONNECT");
     addLog("MQTT 已断开");
+
+    // 每个运行中的任务独立结束；尚未开始的排队任务保留，重连后继续调度。
+    const auto tasks = m_mqttOtaTasks.values();
+    for (MqttOtaTask *task : tasks) {
+        if (task != nullptr && task->isRunning())
+            task->abort("MQTT 连接断开");
+    }
+    updateOtaControls();
 }
 
 void Widget::onMqttStateChanged(MqttClient::State state)
@@ -1904,6 +2143,11 @@ void Widget::onMessageReceived(const QByteArray &message, const QString &topic)
     }
     if (type == Protocol::DEBUG_READ_RSP) {
         handleDebugResponse(deviceId, data);
+        return;
+    }
+    if (type == Protocol::CHARGE_MONITOR_ACK ||
+        type == Protocol::CHARGE_MONITOR_REPORT) {
+        handleChargeMonitorMessage(deviceId, type, data);
         return;
     }
     if (type == Protocol::DIB_WRITE_RSP) {
@@ -2114,8 +2358,8 @@ void Widget::onLoadDibFromFileClicked()
 // ─────────────────────────────────────────────────────────────────────────────
 void Widget::onResetDeviceClicked()
 {
-    if (!m_remoteUnlocked) {
-        QMessageBox::warning(this, "未授权", "请先在「远程控制」页输入密码解锁");
+    if (!m_protectedPagesUnlocked) {
+        QMessageBox::warning(this, "未授权", "请先在任一受保护页面输入密码解锁");
         return;
     }
     if (m_selectedUid.isEmpty()) {
@@ -2133,36 +2377,12 @@ void Widget::onResetDeviceClicked()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  远程控制 — 解锁 / 重新锁定
+//  全局维护权限 — 重新锁定
 // ─────────────────────────────────────────────────────────────────────────────
-void Widget::onRemoteUnlockClicked()
+void Widget::onProtectedPagesLockClicked()
 {
-    static const QString kRemotePassword = "12342234";
-
-    const QString input = m_remotePassEdit->text();
-    if (input == kRemotePassword)
-    {
-        m_remoteUnlocked = true;
-        m_remotePassEdit->clear();
-        m_lblRemoteHint->setText(" ");
-        m_remoteStack->setCurrentIndex(1);
-        addLog("[远程控制] 已解锁，可执行设备操控");
-    }
-    else
-    {
-        m_lblRemoteHint->setText("密码错误");
-        m_remotePassEdit->selectAll();
-        addLog("[远程控制] 密码错误，拒绝解锁");
-    }
-}
-
-void Widget::onRemoteLockClicked()
-{
-    m_remoteUnlocked = false;
-    m_remotePassEdit->clear();
-    m_lblRemoteHint->setText(" ");
-    m_remoteStack->setCurrentIndex(0);
-    addLog("[远程控制] 已重新锁定");
+    setProtectedPagesUnlocked(false);
+    addLog("[维护权限] 五个受保护页面已重新锁定");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2170,8 +2390,8 @@ void Widget::onRemoteLockClicked()
 // ─────────────────────────────────────────────────────────────────────────────
 void Widget::onChargeAllowClicked()
 {
-    if (!m_remoteUnlocked) {
-        QMessageBox::warning(this, "未授权", "请先在「远程控制」页输入密码解锁");
+    if (!m_protectedPagesUnlocked) {
+        QMessageBox::warning(this, "未授权", "请先在任一受保护页面输入密码解锁");
         return;
     }
     if (m_selectedUid.isEmpty()) {
@@ -2192,8 +2412,8 @@ void Widget::onChargeAllowClicked()
 
 void Widget::onChargeLimitClicked()
 {
-    if (!m_remoteUnlocked) {
-        QMessageBox::warning(this, "未授权", "请先在「远程控制」页输入密码解锁");
+    if (!m_protectedPagesUnlocked) {
+        QMessageBox::warning(this, "未授权", "请先在任一受保护页面输入密码解锁");
         return;
     }
     if (m_selectedUid.isEmpty()) {
@@ -2217,8 +2437,8 @@ void Widget::onChargeLimitClicked()
 // ─────────────────────────────────────────────────────────────────────────────
 void Widget::onEraseFlashClicked()
 {
-    if (!m_remoteUnlocked) {
-        QMessageBox::warning(this, "未授权", "请先在「远程控制」页输入密码解锁");
+    if (!m_protectedPagesUnlocked) {
+        QMessageBox::warning(this, "未授权", "请先在任一受保护页面输入密码解锁");
         return;
     }
     if (m_selectedUid.isEmpty()) {
@@ -2320,6 +2540,14 @@ void Widget::handleHeartbeat(const QString &deviceId, const QByteArray &payload)
     if (m_selectedUid == deviceId)
         updateDeviceInfo();
 
+    // FINISH_ACK 后保留最近成功任务，等 App 心跳到达时补充最终上线确认。
+    if (!hb.version.trimmed().isEmpty() &&
+        m_lastSuccessfulMqttOtaByUid.contains(deviceId)) {
+        const quint64 taskId = m_lastSuccessfulMqttOtaByUid.take(deviceId);
+        if (MqttOtaTask *task = mqttOtaTask(taskId))
+            task->confirmHeartbeat(hb.version);
+    }
+
     if (m_otaState == OtaState::Idle && m_otaUid == deviceId)
         m_otaUid.clear();
 }
@@ -2330,14 +2558,16 @@ void Widget::handleHeartbeat(const QString &deviceId, const QByteArray &payload)
 void Widget::handleOtaUplink(const QString &deviceId, Protocol::MsgType type,
                               const QByteArray &data)
 {
-    if (m_otaUid != deviceId) return;
-    if (m_otaState == OtaState::Idle) return;
+    const quint64 taskId = m_mqttOtaByUid.value(deviceId, 0);
+    MqttOtaTask *task = mqttOtaTask(taskId);
+    if (task == nullptr || !task->isRunning())
+        return;
 
-    // 任意 OTA 上行包均视为设备存活，重置超时计时器
-    m_otaTimeout->start(10000);
-
-    addLog(QString("OTA 响应  type=0x%1").arg((uint8_t)type, 2, 16, QChar('0')));
-    otaNextStep(type, data);
+    addLog(QString("[OTA#%1][%2] 收到响应 type=0x%3")
+               .arg(taskId)
+               .arg(deviceId)
+               .arg(static_cast<uint8_t>(type), 2, 16, QChar('0')));
+    task->handlePacket(type, data);
 }
 
 void Widget::onReadDebugClicked()
@@ -2377,19 +2607,145 @@ void Widget::handleDebugResponse(const QString &deviceId, const QByteArray &data
     addLog(QString("[%1] 收到调试数据，共 %2 个字段").arg(deviceId).arg(rows.size()));
 }
 
+void Widget::sendChargeMonitorCommand(Protocol::ChargeMonitorCommand command)
+{
+    if (m_selectedUid.isEmpty()) {
+        addLog("请先在左侧选择一台设备");
+        return;
+    }
+
+    QByteArray payload(1, static_cast<char>(command));
+    publishPacket(m_selectedUid, Protocol::CHARGE_MONITOR_REQ, payload);
+    const bool armed = command == Protocol::ChargeMonitorCommand::Arm;
+    m_lblChargeMonitorState->setText(armed ? "状态: 等待设备确认"
+                                                  : "状态: 等待停止确认");
+    const QString line = QString("[%1] [%2] 已下发%3命令")
+        .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss.zzz"))
+        .arg(m_selectedUid)
+        .arg(armed ? "开始检测" : "停止检测");
+    m_chargeMonitorLog->append(line.toHtmlEscaped());
+    addLog(QString("[%1] %2").arg(m_selectedUid)
+               .arg(armed ? "已下发系统事件监测命令"
+                           : "已下发停止系统事件监测命令"));
+}
+
+void Widget::handleChargeMonitorMessage(const QString &deviceId,
+                                        Protocol::MsgType type,
+                                        const QByteArray &data)
+{
+    // MQTT订阅仍用于维护全部设备；系统事件页面只展示左侧当前选中的设备。
+    if (m_selectedUid.isEmpty() || deviceId != m_selectedUid)
+        return;
+
+    QJsonParseError error;
+    const QJsonDocument document = QJsonDocument::fromJson(data, &error);
+    const QString localTime = QDateTime::currentDateTime()
+                                  .toString("yyyy-MM-dd HH:mm:ss.zzz");
+    if (error.error != QJsonParseError::NoError || !document.isObject()) {
+        m_chargeMonitorLog->append(
+            QString("[%1] 设备 %2 的系统事件数据解析失败：%3")
+                .arg(localTime)
+                .arg(deviceId)
+                .arg(error.errorString()).toHtmlEscaped());
+        return;
+    }
+
+    const QJsonObject object = document.object();
+    const QString reason = object.value("reason").toString("unknown");
+    const int state = object.value("monitor_state").toInt();
+    const qint64 timestamp = object.value("timestamp").toVariant().toLongLong();
+    const QString deviceTime = timestamp > 0
+        ? QDateTime::fromSecsSinceEpoch(timestamp).toLocalTime()
+              .toString("yyyy-MM-dd HH:mm:ss")
+        : "时间无效";
+    const QJsonObject can1 = object.value("can1").toObject();
+    const bool isAck = type == Protocol::CHARGE_MONITOR_ACK;
+    const QString title = isAck ? "命令确认" : "主动事件";
+    const QString advice = chargeMonitorReasonAdvice(reason);
+    const quint32 lastError = can1.value("last_error").toVariant().toUInt();
+
+    QStringList lines;
+    lines << QString("[%1] 【%2】%3")
+                 .arg(localTime, title, chargeMonitorReasonText(reason));
+    lines << QString("设备：%1").arg(deviceId);
+    lines << QString("设备时间：%1").arg(deviceTime);
+    lines << QString("检测状态：%1").arg(chargeMonitorStateText(state));
+    lines << QString("充电信息：%1，SOC：%2%，车辆%3")
+                 .arg(bmsChargeStateText(object.value("bms_charge_state").toInt()))
+                 .arg(object.value("soc").toInt())
+                 .arg(object.value("vehicle_online").toInt() ? "在线" : "离线");
+    lines << QString("休眠计数：已空闲约 %1 秒，距休眠约 %2 秒（阈值 %3 秒）")
+                 .arg(object.value("sleep_idle_seconds").toInt())
+                 .arg(object.value("sleep_remaining_seconds").toInt())
+                 .arg(object.value("sleep_timeout_seconds").toInt());
+    lines << QString("CAN1状态：%1，发送邮箱空闲 %2 个，ESR %3")
+                 .arg(canHalStateText(can1.value("hal_state").toInt()))
+                 .arg(can1.value("mailbox_free").toInt())
+                 .arg(can1.value("esr").toString());
+    lines << QString("CAN1累计：错误 %1，Bus-Off %2，发送成功放入邮箱 %3，无应答 %4，忙 %5，发送失败 %6")
+                 .arg(formattedCount(can1, "error_count"))
+                 .arg(formattedCount(can1, "busoff_count"))
+                 .arg(formattedCount(can1, "tx_submit_count"))
+                 .arg(formattedCount(can1, "ack_error_count"))
+                 .arg(formattedCount(can1, "tx_busy_count"))
+                 .arg(formattedCount(can1, "tx_error_count"));
+    lines << QString("CAN1控制器处理：Bus-Off自动退出 %1，强制重启 %2，重启失败 %3；队列丢帧 %4；最近HAL错误 0x%5")
+                 .arg(formattedCount(can1, "auto_recover_count"))
+                 .arg(formattedCount(can1, "recover_count"))
+                 .arg(formattedCount(can1, "recover_fail_count"))
+                 .arg(formattedCount(can1, "tx_queue_drop_count"))
+                 .arg(lastError, 8, 16, QChar('0'));
+    lines << QString("当前监测阶段新增：CAN错误 %1，Bus-Off %2，无应答 %3，发送失败 %4，队列丢帧 %5，Bus-Off自动退出 %6，重启失败 %7")
+                 .arg(formattedCount(can1, "error_delta"))
+                 .arg(formattedCount(can1, "busoff_delta"))
+                 .arg(formattedCount(can1, "ack_error_delta"))
+                 .arg(formattedCount(can1, "tx_error_delta"))
+                 .arg(formattedCount(can1, "tx_queue_drop_delta"))
+                 .arg(formattedCount(can1, "auto_recover_delta"))
+                 .arg(formattedCount(can1, "recover_fail_delta"));
+    if (!advice.isEmpty())
+        lines << "判断建议：" + advice;
+
+    const QString readableLog = lines.join('\n').toHtmlEscaped()
+                                    .replace("\n", "<br>");
+    m_chargeMonitorLog->append(readableLog);
+    m_chargeMonitorLog->append("<hr>");
+
+    if (isAck) {
+        const auto monitorState = static_cast<Protocol::ChargeMonitorState>(state);
+        m_lblChargeMonitorState->setText(
+            monitorState == Protocol::ChargeMonitorState::Charging
+                ? "状态: 检测中（正在充电）"
+                : monitorState == Protocol::ChargeMonitorState::Armed
+                    ? "状态: 系统事件监测中（当前未充电）"
+                    : "状态: 未布防");
+    } else {
+        if (reason == "system_sleep") {
+            m_lblChargeMonitorState->setText("状态: 设备休眠，监测已结束");
+        } else {
+            m_lblChargeMonitorState->setText(
+                state == static_cast<int>(Protocol::ChargeMonitorState::Charging)
+                    ? "状态: 持续检测中（正在充电）"
+                    : state == static_cast<int>(Protocol::ChargeMonitorState::Armed)
+                        ? "状态: 持续检测中（当前未充电）"
+                        : "状态: 监测已结束");
+        }
+    }
+    addLog(QString("[%1] 系统事件监测%2：%3")
+               .arg(deviceId)
+               .arg(title)
+               .arg(chargeMonitorReasonText(reason)));
+}
+
 void Widget::publishPacket(const QString &deviceId, Protocol::MsgType type,
                            const QByteArray &data)
 {
     QByteArray pkt = Protocol::buildPacket(type, data);
-    if (m_otaChannel == OtaChannel::Serial) {
-        if (m_serial->isOpen())
-            m_serial->write(pkt);
-    } else {
-        QString topic = QString(Protocol::TOPIC_DOWN_FMT).arg(deviceId);
-        QTimer::singleShot(200, this, [this, topic, pkt]() {
+    QString topic = QString(Protocol::TOPIC_DOWN_FMT).arg(deviceId);
+    QTimer::singleShot(200, this, [this, topic, pkt]() {
+        if (m_mqtt->state() == MqttClient::Connected)
             m_mqtt->publish(topic, pkt, 1);
-        });
-    }
+    });
 }
 
 // ─── RS485 串口发送（不依赖 deviceId/topic）─────────────────────────────────
@@ -2427,7 +2783,7 @@ void Widget::refreshSerialPorts()
         m_lblSerialStatus->setText("●  CLOSED");
         m_lblSerialStatus->setStyleSheet("color:#FF2E97;font-weight:bold;letter-spacing:1px;"
                                          "background:transparent;border:none;");
-        m_btnStart->setEnabled(false);
+        updateOtaControls();
         addLog(QString("⚠ 串口 %1 已断开").arg(m_serial->portName()));
     }
 
@@ -2464,7 +2820,7 @@ void Widget::onSerialOpenClicked()
         m_lblSerialStatus->setText("●  CLOSED");
         m_lblSerialStatus->setStyleSheet("color:#FF2E97;font-weight:bold;letter-spacing:1px;"
                                          "background:transparent;border:none;");
-        m_btnStart->setEnabled(false);
+        updateOtaControls();
         addLog("串口已关闭");
         return;
     }
@@ -2485,8 +2841,7 @@ void Widget::onSerialOpenClicked()
     m_lblSerialStatus->setText("●  LIVE");
     m_lblSerialStatus->setStyleSheet("color:#39FF14;font-weight:bold;letter-spacing:1px;"
                                      "background:transparent;border:none;");
-    // 串口已打开 + 有固件 → 允许开始
-    m_btnStart->setEnabled(!m_firmware.isEmpty());
+    updateOtaControls();
     addLog(QString("串口已打开: %1  %2 bps")
            .arg(m_cmbSerialPort->currentText())
            .arg(m_cmbBaudRate->currentData().toInt()));
@@ -2521,9 +2876,14 @@ void Widget::onSerialReadyRead()
             continue;
         }
 
-        // 串口 OTA 上行：复用 handleOtaUplink，deviceId 使用 m_otaUid
+        if (m_otaState == OtaState::Idle) {
+            addLog("串口收到 OTA 响应，但当前没有串口升级任务，已忽略");
+            continue;
+        }
+
         addLog(QString("串口 OTA 响应  type=0x%1").arg((uint8_t)type, 2, 16, QChar('0')));
-        handleOtaUplink(m_otaUid, type, payload);
+        m_otaTimeout->start(10000);
+        otaNextStep(type, payload);
     }
 }
 
@@ -2678,6 +3038,359 @@ void Widget::updateDeviceInfo()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+//  Concurrent MQTT OTA task manager
+// ─────────────────────────────────────────────────────────────────────────────
+QStringList Widget::selectedDeviceUids() const
+{
+    QStringList result;
+    if (m_tree != nullptr) {
+        const auto selectedItems = m_tree->selectedItems();
+        for (QTreeWidgetItem *item : selectedItems) {
+            if (item == nullptr ||
+                item->data(0, Qt::UserRole + 1).toString() != "device") {
+                continue;
+            }
+            const QString uid = item->data(0, Qt::UserRole).toString();
+            if (!uid.isEmpty() && !result.contains(uid))
+                result.append(uid);
+        }
+    }
+
+    if (result.isEmpty() && !m_selectedUid.isEmpty())
+        result.append(m_selectedUid);
+    return result;
+}
+
+int Widget::runningMqttOtaTaskCount() const
+{
+    int count = 0;
+    for (MqttOtaTask *task : m_mqttOtaTasks) {
+        if (task != nullptr && task->isRunning())
+            ++count;
+    }
+    return count;
+}
+
+MqttOtaTask *Widget::mqttOtaTask(quint64 taskId) const
+{
+    return m_mqttOtaTasks.value(taskId, nullptr);
+}
+
+int Widget::mqttOtaTaskRow(quint64 taskId) const
+{
+    if (m_mqttOtaTable == nullptr)
+        return -1;
+
+    for (int row = 0; row < m_mqttOtaTable->rowCount(); ++row) {
+        QTableWidgetItem *item = m_mqttOtaTable->item(row, 0);
+        if (item != nullptr &&
+            item->data(Qt::UserRole).toULongLong() == taskId) {
+            return row;
+        }
+    }
+    return -1;
+}
+
+void Widget::addMqttOtaTaskRow(MqttOtaTask *task)
+{
+    if (task == nullptr || m_mqttOtaTable == nullptr)
+        return;
+
+    const int row = m_mqttOtaTable->rowCount();
+    m_mqttOtaTable->insertRow(row);
+
+    auto *uidItem = new QTableWidgetItem(task->deviceId());
+    uidItem->setData(Qt::UserRole,
+                     QVariant::fromValue<qulonglong>(task->id()));
+    uidItem->setToolTip(task->deviceId());
+    m_mqttOtaTable->setItem(row, 0, uidItem);
+    m_mqttOtaTable->setItem(row, 1,
+                            new QTableWidgetItem(task->firmwareName()));
+    m_mqttOtaTable->setItem(row, 2,
+                            new QTableWidgetItem(task->statusText()));
+
+    auto *progress = new QProgressBar;
+    progress->setRange(0, 100);
+    progress->setValue(task->progress());
+    progress->setFormat("%p%");
+    m_mqttOtaTable->setCellWidget(row, 3, progress);
+    m_mqttOtaTable->setRowHeight(row, 28);
+    updateMqttOtaTaskRow(task->id());
+}
+
+void Widget::updateMqttOtaTaskRow(quint64 taskId)
+{
+    MqttOtaTask *task = mqttOtaTask(taskId);
+    const int row = mqttOtaTaskRow(taskId);
+    if (task == nullptr || row < 0)
+        return;
+
+    QTableWidgetItem *statusItem = m_mqttOtaTable->item(row, 2);
+    if (statusItem != nullptr) {
+        statusItem->setText(task->statusText());
+        QColor color("#7FDEEA");
+        if (task->state() == MqttOtaTask::State::Succeeded)
+            color = QColor("#66BB6A");
+        else if (task->state() == MqttOtaTask::State::Failed ||
+                 task->state() == MqttOtaTask::State::Cancelled)
+            color = QColor("#EF5350");
+        else if (task->isQueued())
+            color = QColor("#FFD300");
+        statusItem->setForeground(color);
+    }
+
+    if (auto *progress =
+            qobject_cast<QProgressBar *>(
+                m_mqttOtaTable->cellWidget(row, 3))) {
+        progress->setValue(task->progress());
+    }
+    updateMqttOtaSummary();
+}
+
+void Widget::updateMqttOtaSummary()
+{
+    if (m_lblMqttOtaSummary == nullptr)
+        return;
+
+    int queued = 0;
+    int succeeded = 0;
+    int failed = 0;
+    for (MqttOtaTask *task : m_mqttOtaTasks) {
+        if (task == nullptr)
+            continue;
+        if (task->isQueued())
+            ++queued;
+        else if (task->state() == MqttOtaTask::State::Succeeded)
+            ++succeeded;
+        else if (task->state() == MqttOtaTask::State::Failed ||
+                 task->state() == MqttOtaTask::State::Cancelled)
+            ++failed;
+    }
+
+    m_lblMqttOtaSummary->setText(
+        QString("运行 %1 / %2　排队 %3　成功 %4　失败 %5")
+            .arg(runningMqttOtaTaskCount())
+            .arg(kMaxConcurrentMqttOtaTasks)
+            .arg(queued)
+            .arg(succeeded)
+            .arg(failed));
+}
+
+void Widget::updateOtaControls()
+{
+    if (m_btnStart == nullptr || m_cmbChannel == nullptr)
+        return;
+
+    const OtaChannel channel =
+        static_cast<OtaChannel>(m_cmbChannel->currentData().toInt());
+    if (channel == OtaChannel::Serial) {
+        m_btnStart->setEnabled(!m_firmware.isEmpty() &&
+                               m_serial != nullptr &&
+                               m_serial->isOpen() &&
+                               m_otaState == OtaState::Idle);
+        return;
+    }
+
+    bool hasEligibleDevice = false;
+    for (const QString &uid : selectedDeviceUids()) {
+        if (m_devices.contains(uid) &&
+            m_devices[uid].isActive() &&
+            !m_mqttOtaByUid.contains(uid)) {
+            hasEligibleDevice = true;
+            break;
+        }
+    }
+
+    m_btnStart->setEnabled(
+        !m_firmware.isEmpty() &&
+        m_mqtt != nullptr &&
+        m_mqtt->state() == MqttClient::Connected &&
+        hasEligibleDevice);
+}
+
+void Widget::createMqttOtaTasks()
+{
+    const QStringList selected = selectedDeviceUids();
+    if (selected.isEmpty()) {
+        QMessageBox::warning(this, "错误", "请先在左侧设备树选择设备");
+        return;
+    }
+
+    QStringList offlineDevices;
+    QStringList duplicateDevices;
+    int createdCount = 0;
+    const int packetSize = m_cmbPktSize->currentData().toInt();
+    const QString firmwareName =
+        m_firmwareName.isEmpty() ? QString("firmware.bin") : m_firmwareName;
+
+    for (const QString &uid : selected) {
+        if (!m_devices.contains(uid) || !m_devices[uid].isActive()) {
+            offlineDevices.append(uid);
+            continue;
+        }
+        if (m_mqttOtaByUid.contains(uid)) {
+            duplicateDevices.append(uid);
+            continue;
+        }
+
+        const quint64 taskId = m_nextMqttOtaTaskId++;
+        auto *task = new MqttOtaTask(taskId, uid, firmwareName,
+                                     m_firmware, packetSize, this);
+        m_mqttOtaTasks.insert(taskId, task);
+        m_mqttOtaByUid.insert(uid, taskId);
+        m_mqttOtaQueue.enqueue(taskId);
+
+        connect(task, &MqttOtaTask::packetReady,
+                this, &Widget::onMqttOtaPacketReady);
+        connect(task, &MqttOtaTask::changed,
+                this, &Widget::updateMqttOtaTaskRow);
+        connect(task, &MqttOtaTask::logMessage, this,
+                [this, task](quint64 id, const QString &message) {
+                    addLog(QString("[OTA#%1][%2] %3")
+                               .arg(id)
+                               .arg(task->deviceId())
+                               .arg(message));
+                });
+        connect(task, &MqttOtaTask::finished,
+                this, &Widget::onMqttOtaTaskFinished);
+
+        addMqttOtaTaskRow(task);
+        ++createdCount;
+    }
+
+    if (createdCount > 0) {
+        addLog(QString("已新建 %1 个 MQTT OTA 任务，固件 %2，包大小 %3 字节")
+                   .arg(createdCount)
+                   .arg(firmwareName)
+                   .arg(packetSize));
+        startQueuedMqttOtaTasks();
+    }
+
+    if (!offlineDevices.isEmpty()) {
+        addLog(QString("以下设备离线，未创建任务：%1")
+                   .arg(offlineDevices.join(", ")));
+    }
+    if (!duplicateDevices.isEmpty()) {
+        addLog(QString("以下设备已有升级任务，已跳过：%1")
+                   .arg(duplicateDevices.join(", ")));
+    }
+    if (createdCount == 0) {
+        QMessageBox::information(
+            this, "未创建任务",
+            "选中的设备均已离线，或已经存在升级/排队任务。");
+    }
+
+    updateMqttOtaQueuePositions();
+    updateMqttOtaSummary();
+    updateOtaControls();
+}
+
+void Widget::startQueuedMqttOtaTasks()
+{
+    if (m_mqtt == nullptr ||
+        m_mqtt->state() != MqttClient::Connected) {
+        updateMqttOtaQueuePositions();
+        return;
+    }
+
+    while (runningMqttOtaTaskCount() < kMaxConcurrentMqttOtaTasks &&
+           !m_mqttOtaQueue.isEmpty()) {
+        const quint64 taskId = m_mqttOtaQueue.dequeue();
+        MqttOtaTask *task = mqttOtaTask(taskId);
+        if (task == nullptr || !task->isQueued())
+            continue;
+
+        addLog(QString("[OTA#%1][%2] 从队列启动（当前并发 %3/%4）")
+                   .arg(taskId)
+                   .arg(task->deviceId())
+                   .arg(runningMqttOtaTaskCount() + 1)
+                   .arg(kMaxConcurrentMqttOtaTasks));
+        task->start();
+    }
+
+    updateMqttOtaQueuePositions();
+    updateMqttOtaSummary();
+    updateOtaControls();
+}
+
+void Widget::updateMqttOtaQueuePositions()
+{
+    int position = 1;
+    for (quint64 taskId : m_mqttOtaQueue) {
+        MqttOtaTask *task = mqttOtaTask(taskId);
+        if (task != nullptr && task->isQueued())
+            task->setQueuePosition(position++);
+    }
+}
+
+void Widget::onMqttOtaPacketReady(quint64 taskId,
+                                  const QString &deviceId,
+                                  Protocol::MsgType type,
+                                  const QByteArray &data,
+                                  int timeoutMs)
+{
+    const QByteArray packet = Protocol::buildPacket(type, data);
+    const QString topic = QString(Protocol::TOPIC_DOWN_FMT).arg(deviceId);
+
+    // 保留原 OTA 下发前 200ms 间隔；每个任务的超时从真正 publish 后开始计算。
+    QTimer::singleShot(200, this,
+                       [this, taskId, topic, packet, timeoutMs]() {
+        MqttOtaTask *task = mqttOtaTask(taskId);
+        if (task == nullptr || !task->isRunning())
+            return;
+        if (m_mqtt == nullptr ||
+            m_mqtt->state() != MqttClient::Connected) {
+            task->abort("MQTT 连接不可用");
+            return;
+        }
+
+        m_mqtt->publish(topic, packet, 1);
+        task->notifyPacketPublished(timeoutMs);
+    });
+}
+
+void Widget::onMqttOtaTaskFinished(quint64 taskId, bool success)
+{
+    MqttOtaTask *task = mqttOtaTask(taskId);
+    if (task == nullptr)
+        return;
+
+    if (m_mqttOtaByUid.value(task->deviceId(), 0) == taskId)
+        m_mqttOtaByUid.remove(task->deviceId());
+    if (success)
+        m_lastSuccessfulMqttOtaByUid[task->deviceId()] = taskId;
+
+    updateMqttOtaTaskRow(taskId);
+    addLog(QString("[OTA#%1][%2] %3，释放一个并发槽位")
+               .arg(taskId)
+               .arg(task->deviceId())
+               .arg(success ? "升级成功" : "升级结束"));
+    startQueuedMqttOtaTasks();
+}
+
+void Widget::clearFinishedMqttOtaTasks()
+{
+    for (int row = m_mqttOtaTable->rowCount() - 1; row >= 0; --row) {
+        QTableWidgetItem *item = m_mqttOtaTable->item(row, 0);
+        if (item == nullptr)
+            continue;
+        const quint64 taskId = item->data(Qt::UserRole).toULongLong();
+        MqttOtaTask *task = mqttOtaTask(taskId);
+        if (task == nullptr || !task->isTerminal())
+            continue;
+
+        if (m_lastSuccessfulMqttOtaByUid.value(task->deviceId(), 0) == taskId)
+            m_lastSuccessfulMqttOtaByUid.remove(task->deviceId());
+        m_mqttOtaTasks.remove(taskId);
+        m_mqttOtaTable->removeRow(row);
+        task->deleteLater();
+    }
+
+    updateMqttOtaSummary();
+    updateOtaControls();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 //  Firmware selection
 // ─────────────────────────────────────────────────────────────────────────────
 void Widget::onSelectFirmwareClicked()
@@ -2697,8 +3410,9 @@ void Widget::onSelectFirmwareClicked()
     }
     m_firmware = f.readAll();
     f.close();
+    m_firmwareName = QFileInfo(path).fileName();
 
-    m_lblFirmPath->setText("▶ " + QFileInfo(path).fileName());
+    m_lblFirmPath->setText("▶ " + m_firmwareName);
     m_lblFirmPath->setStyleSheet("color:#00E5FF;background:transparent;border:none;"
                                  "font-family:Consolas,monospace;font-weight:bold;");
     double kb = m_firmware.size() / 1024.0;
@@ -2707,19 +3421,8 @@ void Widget::onSelectFirmwareClicked()
         .arg(m_firmware.size()).arg(kb, 0, 'f', 1));
 
     addLog(QString("固件已加载: %1  (%2 字节)")
-           .arg(QFileInfo(path).fileName()).arg(m_firmware.size()));
-
-    {
-        OtaChannel ch = (OtaChannel)m_cmbChannel->currentData().toInt();
-        if (ch == OtaChannel::Serial)
-            m_btnStart->setEnabled(!m_firmware.isEmpty() && m_serial->isOpen()
-                                   && m_otaState == OtaState::Idle);
-        else
-            m_btnStart->setEnabled(!m_selectedUid.isEmpty() &&
-                                   m_otaState == OtaState::Idle &&
-                                   m_devices.contains(m_selectedUid) &&
-                                   m_devices[m_selectedUid].isActive());
-    }
+           .arg(m_firmwareName).arg(m_firmware.size()));
+    updateOtaControls();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2735,11 +3438,14 @@ void Widget::onStartOtaClicked()
     OtaChannel ch = (OtaChannel)m_cmbChannel->currentData().toInt();
 
     if (ch == OtaChannel::Serial) {
+        if (m_otaState != OtaState::Idle) {
+            QMessageBox::information(this, "提示", "当前串口升级任务尚未结束");
+            return;
+        }
         if (!m_serial->isOpen()) {
             QMessageBox::warning(this, "错误", "请先打开串口");
             return;
         }
-        m_otaChannel = OtaChannel::Serial;
         // 串口模式不依赖设备列表，otaUid 置空（Boot 侧不需要 topic 路由）
         m_otaUid     = m_selectedUid;   // 有就用，没有也无妨
         m_otaPkt     = 0;
@@ -2748,7 +3454,7 @@ void Widget::onStartOtaClicked()
         m_otaState    = OtaState::WaitBootAck;
         m_otaRetry    = 0;
         m_otaProgress->setValue(0);
-        m_btnStart->setEnabled(false);
+        updateOtaControls();
         m_lblOtaStatus->setText("状态: 通知设备跳转至 Bootloader (RS485)...");
         m_lblOtaStatus->setStyleSheet("color:#FB8C00;background:transparent;border:none;");
         addLog("=== 串口 OTA 升级开始 ===");
@@ -2758,44 +3464,12 @@ void Widget::onStartOtaClicked()
         m_otaTimeout->start(10000);
         addLog("已发送 OTA_ENTER (RS485)");
     } else {
-        if (m_selectedUid.isEmpty()) {
-            QMessageBox::warning(this, "错误", "请先在左侧列表选择在线设备");
-            return;
-        }
-        if (!m_devices[m_selectedUid].isActive()) {
-            QMessageBox::warning(this, "错误", "选中设备已离线（61 秒内无任何上行包）");
-            return;
-        }
         if (m_mqtt->state() != MqttClient::Connected) {
             QMessageBox::warning(this, "错误", "MQTT 未连接");
             return;
         }
-        m_otaChannel = OtaChannel::Mqtt;
-        startOta();
+        createMqttOtaTasks();
     }
-}
-
-void Widget::startOta()
-{
-    m_otaUid      = m_selectedUid;
-    m_otaPkt      = 0;
-    const int pktSz = m_cmbPktSize->currentData().toInt();
-    m_otaPktTotal = (m_firmware.size() + pktSz - 1) / pktSz;
-    m_otaState    = OtaState::WaitBootAck;
-
-    m_otaProgress->setValue(0);
-    m_btnStart->setEnabled(false);
-    m_lblOtaStatus->setText("状态: 通知设备跳转至 Bootloader...");
-    m_lblOtaStatus->setStyleSheet("color:#FB8C00;background:transparent;border:none;");
-
-    addLog("=== OTA 升级开始 ===");
-    addLog(QString("目标: %1   固件: %2 字节   共 %3 包")
-           .arg(m_selectedUid).arg(m_firmware.size()).arg(m_otaPktTotal));
-
-    m_otaRetry = 0;
-    publishPacket(m_otaUid, Protocol::OTA_ENTER);
-    m_otaTimeout->start(10000);
-    addLog("已发送 OTA_ENTER");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2818,7 +3492,7 @@ void Widget::sendOtaData()
         endData[3] = (char)((crc32 >> 24) & 0xFF);
         endData[4] = (char)0x01;  // auto_reboot
 
-        publishPacket(m_otaUid, Protocol::OTA_FINISH, endData);
+        serialSendPacket(Protocol::OTA_FINISH, endData);
         m_otaTimeout->start(10000);
         m_otaProgress->setValue(90);
         m_lblOtaStatus->setText(
@@ -2841,7 +3515,7 @@ void Widget::sendOtaData()
     payload[3] = (char)( m_otaPktTotal   >> 8);
     memcpy(payload.data() + 4, m_firmware.constData() + offset, size);
 
-    publishPacket(m_otaUid, Protocol::OTA_DATA, payload);
+    serialSendPacket(Protocol::OTA_DATA, payload);
     m_otaTimeout->start(5000);
 
     // Progress: DATA phase maps to 10% – 90%
@@ -2887,7 +3561,7 @@ void Widget::otaNextStep(Protocol::MsgType type, const QByteArray &data)
             d[2]=(char)((sz >> 16) & 0xFF); d[3]=(char)((sz >> 24) & 0xFF);
             d[4]=(char)( ps        & 0xFF); d[5]=(char)( ps >> 8);
             d[6]=(char)( pt        & 0xFF); d[7]=(char)( pt >> 8);
-            publishPacket(m_otaUid, Protocol::OTA_BEGIN, d);
+            serialSendPacket(Protocol::OTA_BEGIN, d);
             m_otaTimeout->start(10000);
             m_lblOtaStatus->setText("状态: 等待设备确认升级...");
             addLog(QString("已发送 OTA_BEGIN   固件 %1 字节  共 %2 包").arg(sz).arg(pt));
@@ -2970,17 +3644,11 @@ void Widget::otaNextStep(Protocol::MsgType type, const QByteArray &data)
 void Widget::otaFail(const QString &reason)
 {
     m_otaTimeout->stop();
-    m_otaState   = OtaState::Idle;
-    m_otaChannel = OtaChannel::Mqtt;
+    m_otaState = OtaState::Idle;
     m_otaUid.clear();
     m_lblOtaStatus->setText("状态: 升级失败 — " + reason);
     m_lblOtaStatus->setStyleSheet("color:#EF5350;background:transparent;border:none;");
-    OtaChannel ch = (OtaChannel)m_cmbChannel->currentData().toInt();
-    if (ch == OtaChannel::Serial)
-        m_btnStart->setEnabled(!m_firmware.isEmpty() && m_serial->isOpen());
-    else
-        m_btnStart->setEnabled(!m_selectedUid.isEmpty() && !m_firmware.isEmpty() &&
-            m_devices.contains(m_selectedUid) && m_devices[m_selectedUid].isActive());
+    updateOtaControls();
     addLog("=== OTA 失败: " + reason + " ===");
 }
 
@@ -3003,17 +3671,7 @@ void Widget::otaSuccess()
     // Keep m_otaUid for 5 s to match the first heartbeat after reboot
     QTimer::singleShot(5000, this, [this]{
         m_otaUid.clear();
-        OtaChannel ch = (OtaChannel)m_cmbChannel->currentData().toInt();
-        if (ch == OtaChannel::Serial)
-        {
-            m_btnStart->setEnabled(!m_firmware.isEmpty() && m_serial->isOpen());
-        }
-        else
-        {
-            m_btnStart->setEnabled(
-                !m_selectedUid.isEmpty() && !m_firmware.isEmpty() &&
-                m_devices.contains(m_selectedUid) && m_devices[m_selectedUid].isActive());
-        }
+        updateOtaControls();
         m_lblOtaStatus->setStyleSheet(
             "color:#616161;background:transparent;border:none;");
     });
@@ -3026,7 +3684,7 @@ void Widget::onOtaTimeout()
         m_otaRetry++;
         if (m_otaRetry <= 3) {
             addLog(QString("等待 ENTER_ACK 超时，第 %1 次重发 OTA_ENTER...").arg(m_otaRetry));
-            publishPacket(m_otaUid, Protocol::OTA_ENTER);
+            serialSendPacket(Protocol::OTA_ENTER);
             m_otaTimeout->start(10000);
         } else {
             otaFail("等待 ENTER_ACK 超时，重发 3 次仍无响应");

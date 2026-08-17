@@ -34,6 +34,9 @@ enum MsgType : uint8_t {
 
     DEBUG_READ_REQ = 0x10,   // Qt  → MCU : 请求调试数据
     DEBUG_READ_RSP = 0x11,   // MCU → Qt  : JSON 键值对
+    CHARGE_MONITOR_REQ = 0x12,    // Qt  → MCU : 1B 系统事件监测命令（名称保留兼容）
+    CHARGE_MONITOR_ACK = 0x13,    // MCU → Qt  : 启动/停止确认 JSON
+    CHARGE_MONITOR_REPORT = 0x14, // MCU → Qt  : 持续系统监测期间的重要事件 JSON
 
     DIB_WRITE_REQ  = 0x20,   // Qt  → MCU : 写入 DIB（payload = dib_t 原始字节，定长 472B）
     DIB_WRITE_RSP  = 0x21,   // MCU → Qt  : 写入结果（1B：0x00=OK 0x01=长度错 0x02=写入失败）
@@ -46,6 +49,17 @@ enum MsgType : uint8_t {
 
     FLASH_ERASE_REQ  = 0x32, // Qt → MCU : 擦除 UOTTA flashData 区（无 payload，无回复）
                              //   MCU 清零 flashData 并写回，触发扇区 3 擦除
+};
+
+enum class ChargeMonitorCommand : uint8_t {
+    Disable = 0,
+    Arm = 1,
+};
+
+enum class ChargeMonitorState : uint8_t {
+    Disabled = 0,
+    Armed = 1,
+    Charging = 2,
 };
 
 /* ── DIB 结构 —— 与 FAEBC_APP/User/Inc/u_dib.h 中 dib_t 严格对应 ────
