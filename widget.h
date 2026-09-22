@@ -24,12 +24,15 @@
 #include "mqttclient.h"
 #include "mqttotatask.h"
 #include "protocol.h"
+#include "trace_receiver.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class Widget; }
 QT_END_NAMESPACE
 
 class QGroupBox;
+class LockEventsPage;
+class SystemDataPage;
 
 // ─── Broker connection profile ─────────────────────────────────────────────
 struct BrokerProfile {
@@ -95,6 +98,8 @@ private slots:
     void onSerialReadyRead();
     void onRefreshSerialPorts();
     void onReadDebugClicked();
+    void onReadLockEventsClicked();
+    void onReadSystemDataClicked();
     void onWriteDibClicked();
     void onLoadDibFromFileClicked();
     void onResetDeviceClicked();
@@ -125,7 +130,7 @@ private:
                        const QByteArray &data = {});
 
     // ── Serial ──────────────────────────────────────────────────────────────
-    void serialSendPacket(Protocol::MsgType type, const QByteArray &data = {});
+    bool serialSendPacket(Protocol::MsgType type, const QByteArray &data = {});
 
     // ── Database ────────────────────────────────────────────────────────────
     void setupDatabase();
@@ -237,6 +242,8 @@ private:
 
     // Debug-tab
     QPushButton  *m_btnReadDebug  = nullptr;
+    LockEventsPage *m_lockEventsPage = nullptr;
+    SystemDataPage *m_systemDataPage = nullptr;
 
     // ── DIB 设备参数配置 ───────────────────────────────────────────────
     QLineEdit    *m_dibUsername   = nullptr;
@@ -252,13 +259,15 @@ private:
     QTableWidget *m_debugTable    = nullptr;
     QLabel       *m_lblDebugFrom  = nullptr;
 
+    TraceReceiver m_traceReceiver;
+    QMap<QString,QString> m_traceSummaries;
     // System event monitor tab (protocol names remain ChargeMonitor for compatibility)
     QLabel      *m_lblChargeMonitorState = nullptr;
     QTextEdit   *m_chargeMonitorLog = nullptr;
     QPushButton *m_btnChargeMonitorArm = nullptr;
     QPushButton *m_btnChargeMonitorStop = nullptr;
 
-    // ── 全局维护权限：任一受保护页面解锁后，五个页面同步解锁 ─────────────
+    // ── 全局维护权限：任一受保护页面解锁后，所有页面同步解锁 ─────────────
     QList<QStackedWidget *> m_protectedPageStacks;
     QList<QLineEdit *>      m_protectedPasswordEdits;
     QList<QLabel *>         m_protectedHintLabels;
@@ -300,6 +309,7 @@ private:
     // Serial port (RS485)
     QSerialPort *m_serial             = nullptr;
     QByteArray   m_serialRxBuf;                // 接收粘包缓冲
+    qint64       m_bootRxBytes = 0;            // 本次 BOOT 握手期间收到的原始字节数
     QComboBox   *m_cmbSerialPort      = nullptr;
     QComboBox   *m_cmbBaudRate        = nullptr;
     QPushButton *m_btnSerialOpen      = nullptr;

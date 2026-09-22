@@ -15,13 +15,15 @@ SOURCES += \
     widget.cpp \
     protocol.cpp \
     mqttclient.cpp \
-    mqttotatask.cpp
+    mqttotatask.cpp \
+    lockeventspage.cpp
 
 HEADERS += \
     widget.h \
     protocol.h \
     mqttclient.h \
-    mqttotatask.h
+    mqttotatask.h \
+    lockeventspage.h
 
 FORMS += \
     widget.ui
@@ -30,3 +32,6 @@ FORMS += \
 qnx: target.path = /tmp/$${TARGET}/bin
 else: unix:!android: target.path = /opt/$${TARGET}/bin
 !isEmpty(target.path): INSTALLS += target
+
+SOURCES += systemdatapage.cpp
+HEADERS += systemdatapage.h

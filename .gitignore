@@ -21,3 +21,9 @@ release/
 
 # 运行时产物
 *.db
+.claude/
+.qtcreator/
+build/
+debug/
+diagnostics/
+release/

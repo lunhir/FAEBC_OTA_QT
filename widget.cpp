@@ -1,4 +1,6 @@
 #include "widget.h"
+#include "lockeventspage.h"
+#include "systemdatapage.h"
 #include "ui_widget.h"
 
 #include <QVBoxLayout>
@@ -47,6 +49,10 @@ namespace {
 
 QString chargeMonitorReasonText(const QString &reason)
 {
+    if (reason == "system_reset")          return "设备启动/复位诊断";
+    if (reason == "can_tx_busy")           return "CAN1发送邮箱持续忙";
+    if (reason == "can_rx_queue_drop")     return "CAN1接收队列丢帧";
+    if (reason == "system_feed_delayed")   return "系统常规喂狗已延迟5秒";
     if (reason == "armed")                 return "检测已启动";
     if (reason == "disabled")              return "检测已停止";
     if (reason == "charge_started")         return "车辆开始充电";
@@ -70,6 +76,14 @@ QString chargeMonitorReasonText(const QString &reason)
 
 QString chargeMonitorReasonAdvice(const QString &reason)
 {
+    if (reason == "system_reset")
+        return "请比较复位原因与累计次数；故障寄存器保留最近一次异常，不一定属于最近一次启动。";
+    if (reason == "can_tx_busy")
+        return "发送等待已返回忙，请结合邮箱数量、ESR和成功提交计数判断；设备没有执行新增恢复操作。";
+    if (reason == "can_rx_queue_drop")
+        return "接收队列入队失败，请结合任务运行情况判断。";
+    if (reason == "system_feed_delayed")
+        return "常规喂狗超过5秒未执行，请查看系统任务阶段；这条预警本身不代表已经复位。";
     if (reason == "can_tx_queue_drop")
         return "本次检测已新增至少3次发送队列丢帧，请检查任务调度、队列容量和发送任务运行情况。";
     if (reason == "can_bus_off")
@@ -128,6 +142,7 @@ QString canHalStateText(int state)
 QString formattedCount(const QJsonObject &object, const char *key)
 {
     static const QLocale numberLocale(QLocale::English);
+    if (!object.contains(key)) return "未采集";
     return numberLocale.toString(object.value(key).toVariant().toLongLong());
 }
 
@@ -474,6 +489,11 @@ Widget::Widget(QWidget *parent)
 
     m_serial = new QSerialPort(this);
     connect(m_serial, &QSerialPort::readyRead, this, &Widget::onSerialReadyRead);
+    connect(m_serial, &QSerialPort::errorOccurred, this,
+            [this](QSerialPort::SerialPortError error) {
+        if (error != QSerialPort::NoError)
+            addLog(QString("串口错误 (%1): %2").arg(int(error)).arg(m_serial->errorString()));
+    });
 
     buildUI();
     setupDatabase();
@@ -1132,6 +1152,11 @@ void Widget::buildUI()
     tabs->addTab(createProtectedPage(dbgW, "调试数据"),
                  "  调试数据  ");
 
+    m_lockEventsPage = new LockEventsPage([this] { onReadLockEventsClicked(); });
+    tabs->addTab(createProtectedPage(m_lockEventsPage, "锁止事件"), "  锁止事件  ");
+    m_systemDataPage = new SystemDataPage([this] { onReadSystemDataClicked(); });
+    tabs->addTab(createProtectedPage(m_systemDataPage, "系统数据"), "  系统数据  ");
+
     // System event monitor: normally silent; the device reports important state changes.
     auto *chargeMonW = new QWidget;
     chargeMonW->setStyleSheet("background:transparent;");
@@ -1538,6 +1563,8 @@ void Widget::onTreeSelectionChanged()
 
     QString uid = item->data(0, Qt::UserRole).toString();
     m_selectedUid = uid;
+    if (m_traceSummaries.contains(uid))
+        m_chargeMonitorLog->append(m_traceSummaries.value(uid).toHtmlEscaped().replace("\n","<br>"));
     updateDeviceInfo();
     updateOtaControls();
     addLog(QString("当前设备: %1（OTA 已选择 %2 台）")
@@ -2141,6 +2168,14 @@ void Widget::onMessageReceived(const QByteArray &message, const QString &topic)
         addLog(QString("[%1] 收到无效数据包 (len=%2)").arg(deviceId).arg(message.size()));
         return;
     }
+    if (type == Protocol::SYSTEM_DATA_RSP) {
+        m_systemDataPage->showResponse(deviceId, data);
+        return;
+    }
+    if (type == Protocol::LOCK_EVENTS_RSP) {
+        m_lockEventsPage->showResponse(deviceId, data);
+        return;
+    }
     if (type == Protocol::DEBUG_READ_RSP) {
         handleDebugResponse(deviceId, data);
         return;
@@ -2382,7 +2417,7 @@ void Widget::onResetDeviceClicked()
 void Widget::onProtectedPagesLockClicked()
 {
     setProtectedPagesUnlocked(false);
-    addLog("[维护权限] 五个受保护页面已重新锁定");
+    addLog("[维护权限] 所有受保护页面已重新锁定");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2570,6 +2605,40 @@ void Widget::handleOtaUplink(const QString &deviceId, Protocol::MsgType type,
     task->handlePacket(type, data);
 }
 
+void Widget::onReadLockEventsClicked()
+{
+    if (m_selectedUid.isEmpty()) {
+        QMessageBox::information(this, "锁止事件", "请先在左侧选择一台设备");
+        return;
+    }
+    if (m_mqtt->state() != MqttClient::Connected) {
+        QMessageBox::information(this, "锁止事件", "请先连接服务器");
+        return;
+    }
+    quint32 requestId = m_lockEventsPage->beginRequest(m_selectedUid);
+    QByteArray payload;
+    for (unsigned i=0;i<4;++i) payload.append(static_cast<char>(requestId >> (i*8)));
+    publishPacket(m_selectedUid, Protocol::LOCK_EVENTS_REQ, payload);
+    addLog(QString("[%1] 已发送锁止事件读取请求").arg(m_selectedUid));
+}
+
+void Widget::onReadSystemDataClicked()
+{
+    if (m_selectedUid.isEmpty()) {
+        QMessageBox::information(this, "系统数据", "请先在左侧选择一台设备");
+        return;
+    }
+    if (m_mqtt->state() != MqttClient::Connected) {
+        QMessageBox::information(this, "系统数据", "请先连接服务器");
+        return;
+    }
+    quint32 requestId = m_systemDataPage->beginRequest(m_selectedUid);
+    QByteArray payload;
+    for (unsigned i=0;i<4;++i) payload.append(static_cast<char>(requestId >> (i*8)));
+    publishPacket(m_selectedUid, Protocol::SYSTEM_DATA_REQ, payload);
+    addLog(QString("[%1] 已发送系统数据读取请求").arg(m_selectedUid));
+}
+
 void Widget::onReadDebugClicked()
 {
     if (m_selectedUid.isEmpty()) {
@@ -2633,6 +2702,25 @@ void Widget::handleChargeMonitorMessage(const QString &deviceId,
                                         Protocol::MsgType type,
                                         const QByteArray &data)
 {
+    // Always collect trace fragments, even without a selected device or monitor command.
+    const QJsonObject traceObject=QJsonDocument::fromJson(data).object();
+    if (traceObject.value("reason").toString()=="system_trace") {
+        const auto result=m_traceReceiver.accept(deviceId,traceObject,QDir(QStringLiteral(APP_SOURCE_DIR)).filePath("diagnostics"));
+        if (!result.error.isEmpty()) addLog(QString("[%1] %2").arg(deviceId,result.error));
+        if (result.saved) {
+            publishPacket(deviceId,static_cast<Protocol::MsgType>(0x15),result.ack);
+            if (m_traceSummaries.size()>=256 && !m_traceSummaries.contains(deviceId)) m_traceSummaries.erase(m_traceSummaries.begin());
+            m_traceSummaries[deviceId]=result.summary;
+            if (result.fresh) {
+                addLog(QString("[%1] 主动追踪已保存：%2").arg(deviceId,result.path));
+                if (deviceId==m_selectedUid) {
+                    m_chargeMonitorLog->append(result.summary.toHtmlEscaped().replace("\n","<br>"));
+                    m_lblChargeMonitorState->setText("状态: 追踪现场已自动保存");
+                }
+            }
+        }
+        return;
+    }
     // MQTT订阅仍用于维护全部设备；系统事件页面只展示左侧当前选中的设备。
     if (m_selectedUid.isEmpty() || deviceId != m_selectedUid)
         return;
@@ -2674,6 +2762,7 @@ void Widget::handleChargeMonitorMessage(const QString &deviceId,
                  .arg(bmsChargeStateText(object.value("bms_charge_state").toInt()))
                  .arg(object.value("soc").toInt())
                  .arg(object.value("vehicle_online").toInt() ? "在线" : "离线");
+    if (object.contains("sleep_idle_seconds"))
     lines << QString("休眠计数：已空闲约 %1 秒，距休眠约 %2 秒（阈值 %3 秒）")
                  .arg(object.value("sleep_idle_seconds").toInt())
                  .arg(object.value("sleep_remaining_seconds").toInt())
@@ -2703,6 +2792,29 @@ void Widget::handleChargeMonitorMessage(const QString &deviceId,
                  .arg(formattedCount(can1, "tx_queue_drop_delta"))
                  .arg(formattedCount(can1, "auto_recover_delta"))
                  .arg(formattedCount(can1, "recover_fail_delta"));
+    if (object.contains("SYS_last_reset_reason")) {
+        lines << QString("复位原因：%1；启动累计 %2；IWDG %3；WWDG %4；HardFault %5；Error_Handler %6")
+                     .arg(object.value("SYS_last_reset_reason").toString())
+                     .arg(formattedCount(object, "SYS_boot_count"))
+                     .arg(formattedCount(object, "SYS_iwdg_reset_count"))
+                     .arg(formattedCount(object, "SYS_wwdg_reset_count"))
+                     .arg(formattedCount(object, "SYS_hardfault_reset_count"))
+                     .arg(formattedCount(object, "SYS_error_handler_count"));
+        lines << QString("最近异常：CFSR 0x%1，HFSR 0x%2，故障地址 0x%3")
+                     .arg(object.value("SYS_last_cfsr").toVariant().toUInt(), 8, 16, QChar('0'))
+                     .arg(object.value("SYS_last_hfsr").toVariant().toUInt(), 8, 16, QChar('0'))
+                     .arg(object.value("SYS_last_fault_address").toVariant().toUInt(), 8, 16, QChar('0'));
+        lines << QString("事件序号 %1，启动后 %2 ms；系统阶段 %3（1=NTC，2=休眠，3=喂狗，4=Flash，5=延时）；常规喂狗 %4 次，距上次 %5 ms；事件队列丢弃 %6")
+                     .arg(formattedCount(object, "event_seq"))
+                     .arg(formattedCount(object, "event_uptime_ms"))
+                     .arg(formattedCount(object, "SYS_task_stage"))
+                     .arg(formattedCount(object, "SYS_feed_count"))
+                     .arg(formattedCount(object, "SYS_feed_age_ms"))
+                     .arg(formattedCount(object, "event_queue_dropped"));
+        lines << QString("CAN接收队列丢帧 %1；最大提交间隔 %2 ms（提交不等于已获得总线ACK）")
+                     .arg(formattedCount(can1, "rx_queue_drop_count"))
+                     .arg(formattedCount(can1, "max_submit_gap_ms"));
+    }
     if (!advice.isEmpty())
         lines << "判断建议：" + advice;
 
@@ -2749,10 +2861,22 @@ void Widget::publishPacket(const QString &deviceId, Protocol::MsgType type,
 }
 
 // ─── RS485 串口发送（不依赖 deviceId/topic）─────────────────────────────────
-void Widget::serialSendPacket(Protocol::MsgType type, const QByteArray &data)
+bool Widget::serialSendPacket(Protocol::MsgType type, const QByteArray &data)
 {
-    if (!m_serial->isOpen()) return;
-    m_serial->write(Protocol::buildPacket(type, data));
+    if (!m_serial->isOpen()) {
+        otaFail("串口未打开，命令未发送");
+        return false;
+    }
+    const QByteArray packet = Protocol::buildPacket(type, data);
+    if (m_serial->write(packet) != packet.size()) {
+        otaFail("串口写入失败: " + m_serial->errorString());
+        return false;
+    }
+    if (type == Protocol::OTA_ENTER)
+        addLog(QString("串口 TX 已入队（%1，%2 bps）: %3")
+               .arg(m_serial->portName()).arg(m_serial->baudRate())
+               .arg(QString::fromLatin1(packet.toHex(' '))));
+    return true;
 }
 
 // ─── 串口列表刷新 ─────────────────────────────────────────────────────────────
@@ -2779,6 +2903,9 @@ void Widget::refreshSerialPorts()
     // 如果已打开的端口被拔出，自动关闭串口
     if (m_serial->isOpen() && removed.contains(m_serial->portName())) {
         m_serial->close();
+        m_serialRxBuf.clear();
+        if (m_otaState != OtaState::Idle)
+            otaFail("串口已断开，升级终止");
         m_btnSerialOpen->setText("OPEN");
         m_lblSerialStatus->setText("●  CLOSED");
         m_lblSerialStatus->setStyleSheet("color:#FF2E97;font-weight:bold;letter-spacing:1px;"
@@ -2816,6 +2943,9 @@ void Widget::onSerialOpenClicked()
 {
     if (m_serial->isOpen()) {
         m_serial->close();
+        m_serialRxBuf.clear();
+        if (m_otaState != OtaState::Idle)
+            otaFail("串口已关闭，升级终止");
         m_btnSerialOpen->setText("OPEN");
         m_lblSerialStatus->setText("●  CLOSED");
         m_lblSerialStatus->setStyleSheet("color:#FF2E97;font-weight:bold;letter-spacing:1px;"
@@ -2825,6 +2955,7 @@ void Widget::onSerialOpenClicked()
         return;
     }
 
+    m_serialRxBuf.clear();
     m_serial->setPortName(m_cmbSerialPort->currentText());
     m_serial->setBaudRate(m_cmbBaudRate->currentData().toInt());
     m_serial->setDataBits(QSerialPort::Data8);
@@ -2850,7 +2981,15 @@ void Widget::onSerialOpenClicked()
 // ─── 串口接收：粘包处理，提取完整 V2.1 帧 ──────────────────────────────────
 void Widget::onSerialReadyRead()
 {
-    m_serialRxBuf.append(m_serial->readAll());
+    const QByteArray received = m_serial->readAll();
+    if (m_otaState == OtaState::WaitBootAck && !received.isEmpty()) {
+        m_bootRxBytes += received.size();
+        addLog(QString("BOOT 握手 RX %1 字节: %2%3")
+               .arg(received.size())
+               .arg(QString::fromLatin1(received.left(128).toHex(' ')))
+               .arg(received.size() > 128 ? " ..." : ""));
+    }
+    m_serialRxBuf.append(received);
 
     // 帧格式：[0xFA][Type 1B][Len 2B LE][Data NB][CRC16 2B LE]  最短 6 字节
     while (m_serialRxBuf.size() >= 6) {
@@ -2867,14 +3006,16 @@ void Widget::onSerialReadyRead()
         if (m_serialRxBuf.size() < totalLen) break;  // 数据还没到齐
 
         QByteArray frame = m_serialRxBuf.left(totalLen);
-        m_serialRxBuf.remove(0, totalLen);
 
         Protocol::MsgType type;
         QByteArray payload;
         if (!Protocol::parsePacket(frame, type, payload)) {
-            addLog("串口: 收到无效帧，丢弃");
+            // CRC 失败时只跳过当前帧头，避免吞掉后面的有效 ACK。
+            m_serialRxBuf.remove(0, 1);
+            addLog("串口: CRC 校验失败，重新寻找帧头");
             continue;
         }
+        m_serialRxBuf.remove(0, totalLen);
 
         if (m_otaState == OtaState::Idle) {
             addLog("串口收到 OTA 响应，但当前没有串口升级任务，已忽略");
@@ -2904,6 +3045,8 @@ void Widget::onRefreshTimer()
 // ─────────────────────────────────────────────────────────────────────────────
 void Widget::updateDeviceInfo()
 {
+    if (m_lockEventsPage) m_lockEventsPage->setDevice(m_selectedUid);
+    if (m_systemDataPage) m_systemDataPage->setDevice(m_selectedUid);
     if (m_selectedUid.isEmpty() || !m_devices.contains(m_selectedUid)) {
         m_lblUid->setText("-");
         return;
@@ -2984,11 +3127,13 @@ void Widget::updateDeviceInfo()
                (vs >= 0 && vs < vehStates.size()) ? vehStates[vs] : "未知",
                (vs >= 0 && vs < vehColors.size()) ? vehColors[vs] : "#888888");
 
-    // 高压状态
-    if (hb.hv_state == 0)
+    // 高压状态：与固件心跳一致，0=断开，1=闭合
+    if (hb.hv_state == 1)
         setColored(m_lblHv, "闭合", "#66BB6A");
-    else
+    else if (hb.hv_state == 0)
         setColored(m_lblHv, "断开", "#EF5350");
+    else
+        setColored(m_lblHv, "未知", "#888888");
 
     // 手刹状态
     if (hb.brake_state == 0)
@@ -3446,6 +3591,10 @@ void Widget::onStartOtaClicked()
             QMessageBox::warning(this, "错误", "请先打开串口");
             return;
         }
+        // 清理上一次会话的残帧；必须在发送 ENTER 前执行。
+        m_serialRxBuf.clear();
+        m_serial->readAll();
+        m_bootRxBytes = 0;
         // 串口模式不依赖设备列表，otaUid 置空（Boot 侧不需要 topic 路由）
         m_otaUid     = m_selectedUid;   // 有就用，没有也无妨
         m_otaPkt     = 0;
@@ -3460,7 +3609,7 @@ void Widget::onStartOtaClicked()
         addLog("=== 串口 OTA 升级开始 ===");
         addLog(QString("固件: %1 字节   共 %2 包")
                .arg(m_firmware.size()).arg(m_otaPktTotal));
-        serialSendPacket(Protocol::OTA_ENTER);
+        if (!serialSendPacket(Protocol::OTA_ENTER)) return;
         m_otaTimeout->start(10000);
         addLog("已发送 OTA_ENTER (RS485)");
     } else {
@@ -3492,7 +3641,7 @@ void Widget::sendOtaData()
         endData[3] = (char)((crc32 >> 24) & 0xFF);
         endData[4] = (char)0x01;  // auto_reboot
 
-        serialSendPacket(Protocol::OTA_FINISH, endData);
+        if (!serialSendPacket(Protocol::OTA_FINISH, endData)) return;
         m_otaTimeout->start(10000);
         m_otaProgress->setValue(90);
         m_lblOtaStatus->setText(
@@ -3515,7 +3664,7 @@ void Widget::sendOtaData()
     payload[3] = (char)( m_otaPktTotal   >> 8);
     memcpy(payload.data() + 4, m_firmware.constData() + offset, size);
 
-    serialSendPacket(Protocol::OTA_DATA, payload);
+    if (!serialSendPacket(Protocol::OTA_DATA, payload)) return;
     m_otaTimeout->start(5000);
 
     // Progress: DATA phase maps to 10% – 90%
@@ -3561,7 +3710,7 @@ void Widget::otaNextStep(Protocol::MsgType type, const QByteArray &data)
             d[2]=(char)((sz >> 16) & 0xFF); d[3]=(char)((sz >> 24) & 0xFF);
             d[4]=(char)( ps        & 0xFF); d[5]=(char)( ps >> 8);
             d[6]=(char)( pt        & 0xFF); d[7]=(char)( pt >> 8);
-            serialSendPacket(Protocol::OTA_BEGIN, d);
+            if (!serialSendPacket(Protocol::OTA_BEGIN, d)) return;
             m_otaTimeout->start(10000);
             m_lblOtaStatus->setText("状态: 等待设备确认升级...");
             addLog(QString("已发送 OTA_BEGIN   固件 %1 字节  共 %2 包").arg(sz).arg(pt));
@@ -3679,12 +3828,22 @@ void Widget::otaSuccess()
 
 void Widget::onOtaTimeout()
 {
+    if (m_otaState == OtaState::Idle) return;
+    if (!m_serial->isOpen()) {
+        otaFail("串口未打开，升级终止");
+        return;
+    }
     if (m_otaState == OtaState::WaitBootAck) {
+        addLog(QString("BOOT 握手累计 RX %1 字节，未解析缓冲 %2 字节: %3")
+               .arg(m_bootRxBytes).arg(m_serialRxBuf.size())
+               .arg(QString::fromLatin1(m_serialRxBuf.left(128).toHex(' '))));
+        // 10 秒仍不完整的帧已过期，避免错误长度阻塞下一次 ACK。
+        m_serialRxBuf.clear();
         // Boot 跳转期间 ENTER_ACK 可能因 UART 重初始化丢失，自动重发
         m_otaRetry++;
         if (m_otaRetry <= 3) {
             addLog(QString("等待 ENTER_ACK 超时，第 %1 次重发 OTA_ENTER...").arg(m_otaRetry));
-            serialSendPacket(Protocol::OTA_ENTER);
+            if (!serialSendPacket(Protocol::OTA_ENTER)) return;
             m_otaTimeout->start(10000);
         } else {
             otaFail("等待 ENTER_ACK 超时，重发 3 次仍无响应");

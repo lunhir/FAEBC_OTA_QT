@@ -32,6 +32,10 @@ enum MsgType : uint8_t {
     OTA_FINISH_ACK = 0x08,
     HEARTBEAT      = 0xCC,
 
+    SYSTEM_DATA_REQ = 0x17, // Qt -> MCU: uint32 LE request ID
+    SYSTEM_DATA_RSP = 0x18, // MCU -> Qt: binary snapshot v1, 293 bytes
+    LOCK_EVENTS_REQ = 0x15, // Qt -> MCU: uint32 LE request ID
+    LOCK_EVENTS_RSP = 0x16, // MCU -> Qt: lock events JSON v1
     DEBUG_READ_REQ = 0x10,   // Qt  → MCU : 请求调试数据
     DEBUG_READ_RSP = 0x11,   // MCU → Qt  : JSON 键值对
     CHARGE_MONITOR_REQ = 0x12,    // Qt  → MCU : 1B 系统事件监测命令（名称保留兼容）
@@ -98,7 +102,7 @@ struct HeartbeatData {
     QString  version;        // firmware version string, e.g. "1.0"
     uint8_t  comm_state;     // 0=disconnected  1=connected
     uint8_t  vehicle_state;  // 0=off  1=power  2=running
-    uint8_t  hv_state;       // 0=closed  1=open
+    uint8_t  hv_state;       // 0=open  1=closed
     uint8_t  brake_state;    // 0=released  1=engaged
     uint8_t  speed;          // km/h
     uint32_t total_mileage;  // km
