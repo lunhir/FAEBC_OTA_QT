@@ -34,6 +34,10 @@
 #include <QSerialPort>
 #include <QSerialPortInfo>
 #include <QMouseEvent>
+#include <QWindow>
+#include <QScreen>
+#include <QShowEvent>
+#include <QResizeEvent>
 #include <QSettings>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -444,34 +448,116 @@ QTextEdit {
 )";
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Frameless window dragging
+//  Native window movement / per-screen geometry / full screen
 // ─────────────────────────────────────────────────────────────────────────────
-void Widget::mousePressEvent(QMouseEvent *e)
+Qt::Edges Widget::resizeEdges(const QPoint &point) const
 {
-    if (e->button() == Qt::LeftButton && m_titleBar &&
-        m_titleBar->geometry().contains(e->pos())) {
-        m_dragging  = true;
-        m_dragOffset = e->globalPosition().toPoint() - frameGeometry().topLeft();
-        e->accept();
-        return;
-    }
-    QWidget::mousePressEvent(e);
+    if (isMaximized() || isFullScreen() || !rect().contains(point)) return {};
+    Qt::Edges edges;
+    // The six logical-pixel outer margin remains clear of child controls.
+    if (point.x()<6) edges|=Qt::LeftEdge;
+    if (point.x()>=width()-6) edges|=Qt::RightEdge;
+    if (point.y()<6) edges|=Qt::TopEdge;
+    if (point.y()>=height()-6) edges|=Qt::BottomEdge;
+    return edges;
 }
 
 void Widget::mouseMoveEvent(QMouseEvent *e)
 {
-    if (m_dragging && (e->buttons() & Qt::LeftButton)) {
-        move(e->globalPosition().toPoint() - m_dragOffset);
-        e->accept();
-        return;
-    }
+    const auto edges=resizeEdges(e->position().toPoint());
+    if (edges==(Qt::TopEdge|Qt::LeftEdge) || edges==(Qt::BottomEdge|Qt::RightEdge))
+        setCursor(Qt::SizeFDiagCursor);
+    else if (edges==(Qt::TopEdge|Qt::RightEdge) || edges==(Qt::BottomEdge|Qt::LeftEdge))
+        setCursor(Qt::SizeBDiagCursor);
+    else if (edges & (Qt::LeftEdge|Qt::RightEdge)) setCursor(Qt::SizeHorCursor);
+    else if (edges & (Qt::TopEdge|Qt::BottomEdge)) setCursor(Qt::SizeVerCursor);
+    else unsetCursor();
     QWidget::mouseMoveEvent(e);
 }
 
-void Widget::mouseReleaseEvent(QMouseEvent *e)
+void Widget::leaveEvent(QEvent *e)
 {
-    m_dragging = false;
-    QWidget::mouseReleaseEvent(e);
+    unsetCursor();
+    QWidget::leaveEvent(e);
+}
+
+void Widget::mousePressEvent(QMouseEvent *e)
+{
+    const auto edges=resizeEdges(e->position().toPoint());
+    if (e->button()==Qt::LeftButton && edges && windowHandle() &&
+        windowHandle()->startSystemResize(edges)) { e->accept(); return; }
+
+    if (e->button()==Qt::LeftButton && !isFullScreen() && m_titleBar &&
+        m_titleBar->geometry().contains(e->position().toPoint()) && windowHandle()) {
+        // Qt/Windows owns the drag across monitors with different DPI values.
+        if (windowHandle()->startSystemMove()) { e->accept(); return; }
+    }
+    QWidget::mousePressEvent(e);
+}
+
+void Widget::showEvent(QShowEvent *e)
+{
+    QWidget::showEvent(e);
+    if (!m_windowSignalsConnected && windowHandle()) {
+        m_windowSignalsConnected=true;
+        connect(windowHandle(),&QWindow::screenChanged,this,[this](QScreen *) {
+            m_screenChangePending=true;
+            QTimer::singleShot(0,this,&Widget::fitWindowToScreen);
+        });
+        m_screenChangePending=true;
+        QTimer::singleShot(0,this,&Widget::fitWindowToScreen);
+    }
+}
+
+void Widget::changeEvent(QEvent *e)
+{
+    if (e->type()==QEvent::WindowStateChange) {
+        // A restore may first use the small monitor's last geometry. Do not
+        // mistake that system resize for a new size selected by the user.
+        m_screenChangePending=true;
+        QTimer::singleShot(0,this,&Widget::fitWindowToScreen);
+    }
+    QWidget::changeEvent(e);
+}
+
+void Widget::resizeEvent(QResizeEvent *e)
+{
+    QWidget::resizeEvent(e);
+    // Remember logical user size, not the temporary size needed by a smaller screen.
+    if (isVisible() && !isMaximized() && !isFullScreen() && !isMinimized() &&
+        !m_screenChangePending && !m_adjustingWindow)
+        m_normalWindowSize=e->size();
+}
+
+void Widget::fitWindowToScreen()
+{
+    m_adjustingWindow=true;
+    if (screen() && !isMaximized() && !isFullScreen() && !isMinimized()) {
+        const QRect available=screen()->availableGeometry();
+        const QMargins frame=windowHandle() ? windowHandle()->frameMargins() : QMargins();
+        const QSize room=available.size()-QSize(frame.left()+frame.right(),frame.top()+frame.bottom());
+        resize(m_normalWindowSize.boundedTo(room).expandedTo(minimumSize()));
+        const QRect outer=frameGeometry();
+        const int x=qBound(available.left(),outer.left(),qMax(available.left(),available.right()-outer.width()+1));
+        const int y=qBound(available.top(),outer.top(),qMax(available.top(),available.bottom()-outer.height()+1));
+        move(pos()+QPoint(x,y)-outer.topLeft());
+    }
+    m_screenChangePending=false;
+    m_adjustingWindow=false;
+}
+
+void Widget::toggleFullScreen()
+{
+    m_adjustingWindow=true;
+    if (isFullScreen()) {
+        m_wasMaximized ? showMaximized() : showNormal();
+    } else {
+        m_wasMaximized=isMaximized();
+        showFullScreen();
+    }
+    m_adjustingWindow=false;
+    m_screenChangePending=true;
+    QTimer::singleShot(0,this,&Widget::fitWindowToScreen);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -649,7 +735,9 @@ void Widget::buildUI()
 {
     setStyleSheet(APP_QSS);
     setWindowTitle("▍ OTA CONTROL // 远程升级管理终端");
-    setWindowFlags(Qt::FramelessWindowHint | Qt::Window);
+    // Custom chrome; delegate interactive movement/resizing to the window system.
+    setWindowFlags(Qt::FramelessWindowHint | Qt::Window | Qt::WindowMinimizeButtonHint);
+    setMouseTracking(true);
     resize(1180, 720);
     setMinimumSize(980, 560);
 
@@ -691,20 +779,25 @@ void Widget::buildUI()
         "QPushButton:hover{background:%1;color:#05060E;}"
         "QPushButton:pressed{background:%2;color:#05060E;border-color:%2;}";
 
-    auto *btnMin = new QPushButton("─");
-    btnMin->setCursor(Qt::PointingHandCursor);
-    btnMin->setStyleSheet(QString(winBtnQss).arg("#00E5FF", "#0097A7"));
-    btnMin->setFocusPolicy(Qt::NoFocus);
-    tbH->addWidget(btnMin);
-
-    auto *btnClose = new QPushButton("✕");
-    btnClose->setCursor(Qt::PointingHandCursor);
-    btnClose->setStyleSheet(QString(winBtnQss).arg("#FF2E97", "#B14BFF"));
-    btnClose->setFocusPolicy(Qt::NoFocus);
-    tbH->addWidget(btnClose);
-
-    connect(btnMin,   &QPushButton::clicked, this, &Widget::showMinimized);
-    connect(btnClose, &QPushButton::clicked, this, &Widget::close);
+    auto *btnMin=new QPushButton("─");
+    btnMin->setObjectName("windowMinimizeButton"); btnMin->setToolTip("最小化");
+    auto *btnClose=new QPushButton("✕");
+    btnClose->setObjectName("windowCloseButton"); btnClose->setToolTip("关闭");
+    for (auto *button : {btnMin,btnClose}) {
+        button->setCursor(Qt::PointingHandCursor);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setStyleSheet(QString(winBtnQss).arg(button==btnClose ? "#FF2E97" : "#00E5FF",
+                                                     button==btnClose ? "#B14BFF" : "#0097A7"));
+        tbH->addWidget(button);
+    }
+    connect(btnMin,&QPushButton::clicked,this,&Widget::showMinimized);
+    connect(btnClose,&QPushButton::clicked,this,&Widget::close);
+    auto *fullScreenShortcut=new QShortcut(QKeySequence(Qt::Key_F11),this);
+    connect(fullScreenShortcut,&QShortcut::activated,this,&Widget::toggleFullScreen);
+    auto *exitFullScreenShortcut=new QShortcut(QKeySequence(Qt::Key_Escape),this);
+    connect(exitFullScreenShortcut,&QShortcut::activated,this,[this] {
+        if (isFullScreen()) toggleFullScreen();
+    });
 
     root->addWidget(m_titleBar);
 

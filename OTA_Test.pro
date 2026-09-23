@@ -35,3 +35,7 @@ else: unix:!android: target.path = /opt/$${TARGET}/bin
 
 SOURCES += systemdatapage.cpp
 HEADERS += systemdatapage.h
+
+# Embedded window/taskbar icon and Windows executable icon.
+RESOURCES += app_icons.qrc
+win32:RC_ICONS = assets/ota.ico

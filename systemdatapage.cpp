@@ -10,6 +10,8 @@
 #include <QTabWidget>
 #include <QtEndian>
 #include <cmath>
+#include <QColor>
+#include <QStyle>
 #include <cstring>
 #include <limits>
 
@@ -24,10 +26,20 @@ QTableWidget *makeTable(const QStringList &headers, const char *name)
     t->setAlternatingRowColors(true); t->verticalHeader()->hide();
     t->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     t->horizontalHeader()->setStretchLastSection(true);
-    t->setStyleSheet("QTableWidget{background:#020510;color:#E3F5FA;gridline-color:#193340;}"
-        "QTableWidget::item:alternate{background:#0B1825;}"
-        "QTableWidget::item:selected{background:#245466;}"
-        "QHeaderView::section{background:#142838;color:#D7F0F7;padding:6px;border:0;}");
+    t->setShowGrid(false);
+    t->setStyleSheet(R"QSS(
+QTableWidget { background:#0a1422; alternate-background-color:#0f1e30; color:#d9e8f5;
+    border:1px solid #253c53; border-radius:6px; gridline-color:#1d3247;
+    selection-background-color:#1b4862; selection-color:#f0fcff; }
+QTableWidget::item { padding:3px 2px; border:0; border-bottom:1px solid #192b3d; }
+QTableWidget::item:alternate { background:#0f1e30; }
+QTableWidget::item:selected { background:#1b4862; color:#f0fcff; }
+QHeaderView { background:#15283d; }
+QHeaderView::section { color:#a9dcec; font-weight:600; padding:6px 2px;
+    background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1b344b,stop:1 #14273c);
+    border:0; border-bottom:1px solid #326078; }
+QTableCornerButton::section { background:#15283d; border:0; }
+)QSS");
     return t;
 }
 void addRow(QTableWidget *t, const QStringList &values)
@@ -35,6 +47,14 @@ void addRow(QTableWidget *t, const QStringList &values)
     int r=t->rowCount(); t->insertRow(r);
     for (int c=0;c<values.size();++c) {
         auto *item=new QTableWidgetItem(values[c]); item->setToolTip(values[c]); t->setItem(r,c,item);
+        if (t->objectName()=="systemCan") {
+            item->setTextAlignment(Qt::AlignCenter);
+            if (c>=2) item->setForeground(QColor(values[c]=="00" ? "#6f879f" : "#7de5ef"));
+        }
+        if (t->objectName()=="systemAnalog" && c==3)
+            item->setForeground(QColor(values[c]=="正常" ? "#65dfb9" : "#ff949f"));
+        if (t->objectName()=="systemIo" && c==3)
+            item->setForeground(QColor(values[c].startsWith('1') ? "#7de5ef" : "#a3b4c8"));
     }
 }
 }
@@ -42,23 +62,56 @@ void addRow(QTableWidget *t, const QStringList &values)
 SystemDataPage::SystemDataPage(std::function<void()> request, QWidget *parent) : QWidget(parent)
 {
     setObjectName("systemDataPage"); setAttribute(Qt::WA_StyledBackground,true);
-    setStyleSheet("QWidget#systemDataPage{background:#06101B;} QLabel{color:#D7EDF4;background:transparent;}");
+    setStyleSheet(R"QSS(
+QWidget#systemDataPage { background:#080f1c; }
+QLabel { color:#b8c9dd; background:transparent; }
+QLabel#systemStatus { color:#8faac4; font-size:12px; padding:7px 10px;
+    background:#0e1b2c; border:1px solid #21354b; border-radius:7px; }
+QLabel#lockState { color:#62e3c0; font-size:17px; font-weight:600;
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #123036,stop:1 #0c1928);
+    border:1px solid #23464d; border-left:3px solid #39d8bf; border-radius:6px; padding:10px; }
+QLabel#lockState[alert="true"] { color:#ff9f9f; border-left-color:#ff727f;
+    border-color:#60323f; background:#281a29; }
+QLabel#lockDetails { color:#9eb8cf; padding:2px 8px; }
+QScrollBar:vertical { background:#0b1524; width:8px; margin:0; border:0; }
+QScrollBar:horizontal { background:#0b1524; height:8px; margin:0; border:0; }
+QScrollBar::handle { background:#345971; border-radius:4px; min-height:28px; min-width:28px; }
+QScrollBar::handle:hover { background:#43b6cc; }
+QScrollBar::add-line,QScrollBar::sub-line { width:0; height:0; border:0; }
+QScrollBar::add-page,QScrollBar::sub-page { background:transparent; }
+)QSS");
     auto *layout=new QVBoxLayout(this);
     layout->setContentsMargins(6,10,6,10);
     auto *top=new QHBoxLayout;
     m_read=new QPushButton("读取系统数据"); m_read->setObjectName("systemReadButton");
-    m_read->setStyleSheet("QPushButton{background:#087E8B;color:white;padding:8px 18px;border:0;border-radius:4px;}"
-                         "QPushButton:disabled{background:#394A55;color:#A3AFB5;}");
+    m_read->setCursor(Qt::PointingHandCursor);
+    m_read->setStyleSheet(R"QSS(
+QPushButton { color:#f0fdff; font-weight:600; padding:9px 16px;
+    border:1px solid #43bdd5; border-radius:7px;
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #157aa6,stop:1 #126c80); }
+QPushButton:hover { border-color:#95f1ff;
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #2499c4,stop:1 #178b99); }
+QPushButton:pressed { background:#12516d; border-color:#51d8e9; }
+QPushButton:focus { border:2px solid #a4efff; padding:8px 15px; }
+QPushButton:disabled { background:#172a3c; border-color:#294053; color:#728ca2; }
+)QSS");
     m_status=new QLabel("请选择设备，然后点击读取"); m_status->setObjectName("systemStatus"); m_status->setWordWrap(true);
     top->addWidget(m_read); top->addWidget(m_status,1); layout->addLayout(top);
     m_can=makeTable({"索引","CAN ID","D0","D1","D2","D3","D4","D5","D6","D7"},"systemCan");
     m_analog=makeTable({"通道","ADC 原始值","NTC 温度（℃）","NTC 状态"},"systemAnalog");
     m_io=makeTable({"类型","编号","信号名称","原始电平"},"systemIo");
     auto *tabs=new QTabWidget; tabs->setObjectName("systemDataTabs");
-    tabs->setStyleSheet("QTabWidget::pane{border:1px solid #193340;background:#06101B;}"
-        "QTabBar::tab{background:#142838;color:#B9D3DE;padding:10px 22px;margin-right:4px;}"
-        "QTabBar::tab:selected{background:#087E8B;color:white;}"
-        "QTabBar::tab:hover{background:#245466;}");
+    tabs->setStyleSheet(R"QSS(
+QTabWidget::pane { border:1px solid #263b53; border-radius:8px; background:#0c1726; top:-1px; }
+QTabBar { background:transparent; }
+QTabBar::tab { color:#8fa7c3; background:#101e30; font-weight:600;
+    border:1px solid #253850; border-bottom:2px solid #253850;
+    border-top-left-radius:6px; border-top-right-radius:6px;
+    padding:9px 16px; margin-right:5px; }
+QTabBar::tab:selected { color:#abf3ff; border-color:#326279; border-bottom:2px solid #4bddf3;
+    background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #19384d,stop:1 #102337); }
+QTabBar::tab:hover:!selected { color:#d8f6ff; background:#192f45; border-color:#395770; }
+)QSS");
     auto addPage=[tabs](const QString &title,const QString &hint,QTableWidget *table) {
         auto *page=new QWidget;
         auto *box=new QVBoxLayout(page); box->setContentsMargins(6,10,6,10); box->setSpacing(12);

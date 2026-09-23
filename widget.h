@@ -80,7 +80,10 @@ public:
 protected:
     void mousePressEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
-    void mouseReleaseEvent(QMouseEvent *e) override;
+    void leaveEvent(QEvent *e) override;
+    void showEvent(QShowEvent *e) override;
+    void resizeEvent(QResizeEvent *e) override;
+    void changeEvent(QEvent *e) override;
 
 private slots:
     void onMqttConnected();
@@ -112,6 +115,9 @@ private slots:
 private:
     // ── UI ─────────────────────────────────────────────────────────────────
     void buildUI();
+    void toggleFullScreen();
+    void fitWindowToScreen();
+    Qt::Edges resizeEdges(const QPoint &point) const;
     QWidget *createProtectedPage(QWidget *content, const QString &pageName);
     void tryUnlockProtectedPages(QLineEdit *passwordEdit, QLabel *hintLabel);
     void setProtectedPagesUnlocked(bool unlocked);
@@ -303,8 +309,11 @@ private:
 
     // Custom title bar
     QWidget *m_titleBar = nullptr;
-    QPoint   m_dragOffset;
-    bool     m_dragging = false;
+    QSize m_normalWindowSize = QSize(1180,720);
+    bool m_screenChangePending = false;
+    bool m_adjustingWindow = false;
+    bool m_windowSignalsConnected = false;
+    bool m_wasMaximized = false;
 
     // Serial port (RS485)
     QSerialPort *m_serial             = nullptr;

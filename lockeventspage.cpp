@@ -12,6 +12,8 @@
 #include <QDateTime>
 #include <QTabWidget>
 #include <cmath>
+#include <QColor>
+#include <QStyle>
 
 namespace {
 QString sourceName(int n)
@@ -41,11 +43,20 @@ QTableWidget *table(const QStringList &headers)
     t->verticalHeader()->hide();
     t->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     t->horizontalHeader()->setStretchLastSection(true);
-    t->setStyleSheet("QTableWidget{background:#020510;color:#E3F5FA;gridline-color:#193340;}"
-                     "QTableWidget::item:alternate{background:#0B1825;}"
-                     "QTableWidget::item:selected{background:#245466;}"
-                     "QHeaderView{background:#142838;}"
-                     "QHeaderView::section{background:#142838;color:#D7F0F7;padding:4px 2px;border:0;}");
+    t->setShowGrid(false);
+    t->setStyleSheet(R"QSS(
+QTableWidget { background:#0a1422; alternate-background-color:#0f1e30; color:#d9e8f5;
+    border:1px solid #253c53; border-radius:6px; gridline-color:#1d3247;
+    selection-background-color:#1b4862; selection-color:#f0fcff; }
+QTableWidget::item { padding:3px 2px; border:0; border-bottom:1px solid #192b3d; }
+QTableWidget::item:alternate { background:#0f1e30; }
+QTableWidget::item:selected { background:#1b4862; color:#f0fcff; }
+QHeaderView { background:#15283d; }
+QHeaderView::section { color:#a9dcec; font-weight:600; padding:6px 2px;
+    background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #1b344b,stop:1 #14273c);
+    border:0; border-bottom:1px solid #326078; }
+QTableCornerButton::section { background:#15283d; border:0; }
+)QSS");
     return t;
 }
 void row(QTableWidget *t, const QStringList &values)
@@ -63,27 +74,60 @@ LockEventsPage::LockEventsPage(std::function<void()> request, QWidget *parent) :
 {
     setObjectName("lockEventsPage");
     setAttribute(Qt::WA_StyledBackground, true);
-    setStyleSheet("QWidget#lockEventsPage{background:#06101B;} QLabel{color:#D7EDF4;background:transparent;}");
+    setStyleSheet(R"QSS(
+QWidget#lockEventsPage { background:#080f1c; }
+QLabel { color:#b8c9dd; background:transparent; }
+QLabel#lockStatus { color:#8faac4; font-size:12px; padding:7px 10px;
+    background:#0e1b2c; border:1px solid #21354b; border-radius:7px; }
+QLabel#lockState { color:#62e3c0; font-size:17px; font-weight:600;
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:0,stop:0 #123036,stop:1 #0c1928);
+    border:1px solid #23464d; border-left:3px solid #39d8bf; border-radius:6px; padding:10px; }
+QLabel#lockState[alert="true"] { color:#ff9f9f; border-left-color:#ff727f;
+    border-color:#60323f; background:#281a29; }
+QLabel#lockDetails { color:#9eb8cf; padding:2px 8px; }
+QScrollBar:vertical { background:#0b1524; width:8px; margin:0; border:0; }
+QScrollBar:horizontal { background:#0b1524; height:8px; margin:0; border:0; }
+QScrollBar::handle { background:#345971; border-radius:4px; min-height:28px; min-width:28px; }
+QScrollBar::handle:hover { background:#43b6cc; }
+QScrollBar::add-line,QScrollBar::sub-line { width:0; height:0; border:0; }
+QScrollBar::add-page,QScrollBar::sub-page { background:transparent; }
+)QSS");
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(6,10,6,10); layout->setSpacing(8);
     auto *top = new QHBoxLayout;
     m_read = new QPushButton(QStringLiteral("读取锁止事件"));
     m_read->setObjectName("lockReadButton");
-    m_read->setStyleSheet("QPushButton{background:#087E8B;color:white;padding:8px 18px;border:0;border-radius:4px;}"
-                         "QPushButton:disabled{background:#394A55;color:#A3AFB5;}");
+    m_read->setCursor(Qt::PointingHandCursor);
+    m_read->setStyleSheet(R"QSS(
+QPushButton { color:#f0fdff; font-weight:600; padding:9px 16px;
+    border:1px solid #43bdd5; border-radius:7px;
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #157aa6,stop:1 #126c80); }
+QPushButton:hover { border-color:#95f1ff;
+    background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #2499c4,stop:1 #178b99); }
+QPushButton:pressed { background:#12516d; border-color:#51d8e9; }
+QPushButton:focus { border:2px solid #a4efff; padding:8px 15px; }
+QPushButton:disabled { background:#172a3c; border-color:#294053; color:#728ca2; }
+)QSS");
     m_status = new QLabel(QStringLiteral("请选择设备，然后点击读取"));
     m_status->setObjectName("lockStatus"); m_status->setWordWrap(true);
     top->addWidget(m_read); top->addWidget(m_status,1); layout->addLayout(top);
     m_state = new QLabel(QStringLiteral("当前到位状态：—"));
-    m_state->setObjectName("lockState"); m_state->setStyleSheet("color:#64E0C5;font-size:18px;font-weight:600;");
+    m_state->setObjectName("lockState");
     m_details = new QLabel(QStringLiteral("动作状态：—"));
     m_details->setObjectName("lockDetails"); m_details->setWordWrap(true);
     m_state->setWordWrap(true);
     auto *tabs = new QTabWidget; tabs->setObjectName("lockEventsTabs");
-    tabs->setStyleSheet("QTabWidget::pane{border:1px solid #193340;background:#06101B;}"
-        "QTabBar::tab{background:#142838;color:#B9D3DE;padding:10px 22px;margin-right:4px;}"
-        "QTabBar::tab:selected{background:#087E8B;color:white;}"
-        "QTabBar::tab:hover{background:#245466;}");
+    tabs->setStyleSheet(R"QSS(
+QTabWidget::pane { border:1px solid #263b53; border-radius:8px; background:#0c1726; top:-1px; }
+QTabBar { background:transparent; }
+QTabBar::tab { color:#8fa7c3; background:#101e30; font-weight:600;
+    border:1px solid #253850; border-bottom:2px solid #253850;
+    border-top-left-radius:6px; border-top-right-radius:6px;
+    padding:9px 16px; margin-right:5px; }
+QTabBar::tab:selected { color:#abf3ff; border-color:#326279; border-bottom:2px solid #4bddf3;
+    background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 #19384d,stop:1 #102337); }
+QTabBar::tab:hover:!selected { color:#d8f6ff; background:#192f45; border-color:#395770; }
+)QSS");
     auto *statsBox = new QWidget;
     auto *statsLayout = new QVBoxLayout(statsBox); statsLayout->setContentsMargins(6,10,6,10); statsLayout->setSpacing(12);
     statsLayout->addWidget(m_state); statsLayout->addWidget(m_details);
@@ -121,6 +165,8 @@ LockEventsPage::LockEventsPage(std::function<void()> request, QWidget *parent) :
 void LockEventsPage::clearData()
 {
     m_counts->setRowCount(0); m_events->setRowCount(0);
+    m_state->setProperty("alert",false);
+    m_state->style()->unpolish(m_state); m_state->style()->polish(m_state);
     m_state->setText(QStringLiteral("当前到位状态：—")); m_details->setText(QStringLiteral("动作状态：—"));
 }
 void LockEventsPage::setDevice(const QString &uid)
@@ -176,6 +222,8 @@ bool LockEventsPage::showResponse(const QString &uid, const QByteArray &payload)
     else if (unlocked) state=QStringLiteral("已解锁");
     else if ((inputs & 15)!=15) state=QStringLiteral("部分锁止到位");
     else state=QStringLiteral("未到位");
+    m_state->setProperty("alert",(inputs & 15)!=15 && unlocked);
+    m_state->style()->unpolish(m_state); m_state->style()->polish(m_state);
     m_state->setText(QStringLiteral("当前到位状态：%1").arg(state));
     QStringList pins;
     for (int i=0;i<4;++i) pins << QStringLiteral("锁%1：%2").arg(i+1).arg((inputs&(1<<i)) ? "未到位":"到位");
@@ -202,6 +250,8 @@ bool LockEventsPage::showResponse(const QString &uid, const QByteArray &payload)
         const QString time=a[1].toString();
         row(m_events,{QDateTime::fromString(time,"yyyy-MM-dd HH:mm:ss").isValid() ? time:"时间未校准",
             sourceName(a[2].toInt()),a[3].toInt() ? "解锁":"上锁",a[4].toInt() ? "强制":"普通",results[status],detail,number(a[8]),number(a[0])});
+        auto *resultItem=m_events->item(m_events->rowCount()-1,4);
+        resultItem->setForeground(QColor(status==0 ? "#65dfb9" : status==2 || status==5 ? "#edc77e" : "#ff949f"));
     }
     m_status->setText(QStringLiteral("设备：%1 · 更新于 %2 · 最近 %3 条%4").arg(uid)
         .arg(QDateTime::currentDateTime().toString("HH:mm:ss")).arg(events.size())
