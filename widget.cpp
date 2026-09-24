@@ -582,6 +582,8 @@ Widget::Widget(QWidget *parent)
     });
 
     buildUI();
+    setFocusPolicy(Qt::StrongFocus);
+    setFocus(Qt::OtherFocusReason);
     setupDatabase();
 
     m_mqtt = new MqttClient(this);
@@ -3668,6 +3670,7 @@ void Widget::onSelectFirmwareClicked()
 // ─────────────────────────────────────────────────────────────────────────────
 void Widget::onStartOtaClicked()
 {
+    setFocus(Qt::OtherFocusReason);
     if (m_firmware.isEmpty()) {
         QMessageBox::warning(this, "错误", "请先选择固件 .bin 文件");
         return;
